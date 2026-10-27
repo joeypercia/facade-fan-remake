@@ -18,6 +18,8 @@ import struct
 import sys
 from pathlib import Path
 
+from facade_formats import read_sbinary
+
 DEFAULT_FACADE = Path(r"C:\Program Files (x86)\Facade")
 
 
@@ -114,20 +116,25 @@ def build(facade):
     for char in ("grace", "trip"):
         cls = util / "classes" / "facade" / "util" / f"{char.capitalize()}Script.class"
         recordings = index_recordings(util / "sources" / "facade" / "Sounds" / char)
+        perfs = read_sbinary(facade, char)
         for name, value in sorted(read_class_constants(cls).items(), key=lambda kv: kv[1]):
             m = DIALOG.match(name)
             if not m:
                 continue
             direction, tokens = split_direction(m["rest"])
             wav = recordings.get(value)
+            perf = perfs.get(value)
             lines.append({
                 "id": f"{char}:{value}",
                 "character": char,
                 "script_index": value,
                 "beat": m["beat"],
                 "direction": direction,
-                "text": words_to_text(tokens),
+                # The performance script carries the real subtitle; the constant name is a fallback.
+                "text": (perf.text.strip() if perf and perf.text else words_to_text(tokens)),
                 "audio": str(wav.relative_to(facade)).replace("\\", "/") if wav else None,
+                "phrases": perf.mouth if perf else [],
+                "cues": perf.cues if perf else [],
             })
     return lines
 

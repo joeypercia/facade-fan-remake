@@ -82,7 +82,10 @@ what keeps it "the original story" while still answering what you actually said.
 
 ## Open questions
 
-- Where the character meshes and apartment geometry live (engine DLL vs. procedural).
+- How the engine draws characters from their joints (no mesh files exist; see ASSETS.md).
+  Recover the drawing rules, or build a new character renderer driven by the same skeleton.
+- Whether a local LLM and local voice synthesis together can hit the latency budget on 12 GB.
+  This is worth prototyping early, in parallel with the renderer.
 - How much of the beat graph can be recovered automatically from the compiled ABL classes,
   versus hand-annotated from play.
 - Which local TTS gives the best quality per VRAM while sharing the GPU with the LLM.

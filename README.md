@@ -19,9 +19,11 @@ Early development. The working pieces so far:
 
 | Piece | State |
 |---|---|
-| Line catalog: reads all 8,660 lines (beat, direction, text, recording) from your install | working |
+| Line catalog: all 8,660 lines (beat, direction, subtitle, recording, phonemes, cues) from your install | working |
 | Asset guard: blocks commits that contain original assets | working |
-| Animation, skeleton and mesh decoding | in progress |
+| Animation decoding: clip index, joint-position frames, performance scripts | working |
+| Apartment layout: all 127 walls and props, with positions | working |
+| Character drawing rules (the engine has no mesh files) | in progress |
 | Renderer (HD, widescreen, fullscreen) | planned |
 | Drama manager on a local LLM | planned |
 | Voice: original recordings, plus voice synthesis for new lines | planned |
