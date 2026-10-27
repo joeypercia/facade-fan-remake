@@ -1,34 +1,78 @@
 """Grace's and Trip's voices: original recordings when one fits, local synthesis otherwise.
 
-Synthesis is conditioned on a few original recordings read from the player's own install.
-The conditioning lives in memory only. The temporary reference file is deleted right after use,
-and nothing derived from the voices is saved. See docs/LEGAL.md.
+Synthesis (Chatterbox Turbo) is expressive in two ways:
+- each character has one conditioning per emotion, built from original takes the script marks
+  with that emotion (angry takes for angry lines, warm takes for warm lines...), so the actors'
+  own performances carry the tone;
+- the line's delivery adds one of Turbo's style tags ([sarcastic], [angry]...), and the writer
+  may put nonverbal tags ([sigh], [laugh]...) in the text.
+
+Audio streams: the first ~0.5 s of a line plays while the rest is still being generated.
+
+Conditioning lives in memory only. Temporary reference files are deleted right after use, and
+nothing derived from the voices is saved. Every synthesized chunk carries Chatterbox's Perth
+watermark. See docs/LEGAL.md.
 """
+import collections
 import os
-import queue
 import re
 import tempfile
 import threading
 import time
 
 import numpy as np
-import sounddevice as sd
 import soundfile as sf
 
-from config import FACADE, RECORDING_MATCH, TTS_ENGINE, VOICE_SYNTHESIS
+from config import FACADE, RECORDING_MATCH, VOICE_SYNTHESIS
 
-# Map loose acting directions to Chatterbox's expressiveness controls.
-INTENSE = ("angry", "furious", "yell", "shout", "excited", "exasperated", "pointed", "sharp", "frustrated")
-FLAT = ("dry", "flat", "cold", "quiet", "muted", "tired", "deadpan", "awkward")
+SR = 24000  # Chatterbox's output rate; recordings (22.05 kHz) are resampled to it
+
+# Emotion buckets: original directions that feed each one, and delivery words that select it.
+EMOTIONS = {
+    "warm": ({"WARM", "SMILING", "SMILE", "PLEASED", "SWEET", "CHEERY", "UPBEAT", "EXCITED", "HAPPY",
+              "JOKING", "GREET"},
+             ("warm", "cheer", "happy", "excited", "enthusias", "friendly", "joking", "playful", "bright",
+              "proud", "eager", "flirt", "delighted", "smiling")),
+    "annoyed": ({"ANNOYED", "FRUSTRATED", "SARCASTIC", "COLD", "IMPATIENT", "RILED", "TENSE", "DEFENSIVE"},
+                ("annoyed", "irritat", "frustrat", "sarcas", "dry", "pointed", "cold", "tense", "defensive",
+                 "impatient", "curt", "clipped", "sharp", "mocking", "tight", "icy", "snippy")),
+    "angry": ({"ANGRY", "FURIOUS", "ACCUSATION", "ADMONISH"},
+              ("angry", "furious", "yell", "shout", "rage", "accus", "explod", "livid", "seething")),
+    "sad": ({"UPSET", "SAD", "DOWN", "DOWNBEAT", "DEFEATED", "REJECTED", "DESPERATE", "DISMAYED"},
+            ("sad", "hurt", "upset", "defeated", "wounded", "tearful", "crying", "desperate", "quiet",
+             "resigned", "dejected", "broken", "pleading")),
+    "anxious": ({"CONCERNED", "ANXIOUS", "NERVOUS", "UNSURE"},
+                ("anxious", "nervous", "concerned", "worried", "unsure", "awkward", "uneasy", "hesitant",
+                 "uncomfortable", "flustered")),
+    "neutral": ({"NEUTRAL"}, ()),
+}
+# Takes that make poor references: cut off, muffled, or not the character's normal voice.
+BAD_REFERENCE = {"INTERRUPTED", "INTERRUPTING", "OFFSCREEN", "MUTED", "UNDERBREATH", "UNDER", "WALKING"}
+
+# Turbo style tags by delivery word. Nonverbal tags the writer may use inline.
+STYLE_TAGS = (
+    (("sarcas", "dry", "mocking", "pointed", "snide", "wry"), "[sarcastic]"),
+    (("angry", "furious", "yell", "shout", "livid", "seething"), "[angry]"),
+    (("happy", "cheer", "delighted", "excited", "enthusias"), "[happy]"),
+    (("surprised", "shocked", "startled", "astonish"), "[surprised]"),
+    (("scared", "afraid", "fear", "panic"), "[fear]"),
+    (("crying", "tearful", "sobbing"), "[crying]"),
+    (("whisper", "hushed", "under breath", "under her breath", "under his breath"), "[whispering]"),
+)
+NONVERBAL = ("[sigh]", "[laugh]", "[chuckle]", "[gasp]", "[groan]", "[sniff]", "[clear throat]")
 
 
-def style_for(delivery):
+def emotion_for(delivery):
     d = delivery.lower()
-    if any(w in d for w in INTENSE):
-        return 0.8, 0.35  # exaggeration, cfg_weight
-    if any(w in d for w in FLAT):
-        return 0.3, 0.5
-    return 0.5, 0.5
+    for name, (_, words) in EMOTIONS.items():
+        if any(w in d for w in words):
+            return name
+    return "neutral"
+
+
+def style_tag(delivery):
+    d = delivery.lower()
+    return next((tag for words, tag in STYLE_TAGS if any(w in d for w in words)), "")
 
 
 def quiet_engine():
@@ -45,88 +89,141 @@ def quiet_engine():
 
 
 def speakable(text):
-    """Drop *stage business* and tidy spacing; return None if nothing is left to say."""
+    """Drop *stage business* and any bracket tag Turbo doesn't know; None if nothing is left to say."""
     t = re.sub(r"\*[^*]*\*", " ", text)
+    t = re.sub(r"\[[^\]]*\]", lambda m: m.group(0) if m.group(0).lower() in NONVERBAL else " ", t)
     t = re.sub(r"\s+", " ", t).strip()
-    return t or None
+    return t if re.search(r"[A-Za-z]", re.sub(r"\[[^\]]*\]", "", t)) else None
+
+
+class Player:
+    """One continuous output stream fed from a queue, so streamed chunks play back to back."""
+
+    def __init__(self, mute=False):
+        self.chunks = collections.deque()
+        self.lock = threading.Lock()
+        self.pending = 0
+        self.mute = mute
+        if not mute:
+            import sounddevice as sd
+            self.stream = sd.OutputStream(samplerate=SR, channels=1, dtype="float32",
+                                          blocksize=480, callback=self._fill)
+            self.stream.start()
+
+    def push(self, x):
+        if self.mute:
+            return
+        with self.lock:
+            self.chunks.append(np.asarray(x, dtype="float32"))
+            self.pending += len(x)
+
+    def _fill(self, out, frames, _time, _status):
+        out.fill(0)
+        filled = 0
+        with self.lock:
+            while filled < frames and self.chunks:
+                c = self.chunks[0]
+                n = min(frames - filled, len(c))
+                out[filled:filled + n, 0] = c[:n]
+                filled += n
+                if n == len(c):
+                    self.chunks.popleft()
+                else:
+                    self.chunks[0] = c[n:]
+            self.pending -= filled
+
+    def wait(self):
+        while self.pending > 0:
+            time.sleep(0.02)
 
 
 class Voices:
-    def __init__(self, catalog):
+    def __init__(self, catalog, mute=False):
         self.catalog = catalog
         self.model = None
-        self.conds = {}
-        self.out = queue.Queue()
-        self.player = threading.Thread(target=self._play_loop, daemon=True)
-        self.player.start()
+        self.conds = {}  # (character, emotion) -> conditionals
+        self.player = Player(mute)
 
     def load(self):
         quiet_engine()
-        if TTS_ENGINE == "turbo":
-            from chatterbox.tts_turbo import ChatterboxTurboTTS as Engine
-        else:
-            from chatterbox.tts import ChatterboxTTS as Engine
-        self.model = Engine.from_pretrained(device="cuda")
+        from chatterbox.tts_turbo import ChatterboxTurboTTS
+        self.model = ChatterboxTurboTTS.from_pretrained(device="cuda")
         for ch, allowed in VOICE_SYNTHESIS.items():
-            if allowed:
-                self.conds[ch] = self._condition(ch)
+            if not allowed:
+                continue
+            for emotion, (directions, _) in EMOTIONS.items():
+                clips = self.catalog.reference_clips(ch, directions=directions, avoid=BAD_REFERENCE)
+                if clips:
+                    self.conds[(ch, emotion)] = self._condition(clips)
         # One throwaway render so CUDA kernels are compiled before the first real line.
         if self.conds:
+            from streaming import stream
             self.model.conds = next(iter(self.conds.values()))
-            self._generate("Warming up.", "")
+            for _ in stream(self.model, "Warming up the voices now."):
+                pass
 
-    def _generate(self, text, delivery):
-        if TTS_ENGINE == "turbo":
-            return self.model.generate(text)
-        ex, cfg = style_for(delivery)
-        return self.model.generate(text, exaggeration=ex, cfg_weight=cfg)
+    def warm_thread(self):
+        """Run the GPU paths once on the calling thread. PyTorch sets up CUDA handles per thread,
+        so the thread that voices lines should call this before the first real one (~1 s saved)."""
+        from streaming import stream
+        self.catalog.nearest("trip", "warm up")
+        if self.conds:
+            self.model.conds = next(iter(self.conds.values()))
+            for _ in stream(self.model, "Warming up."):
+                pass
 
-    def _condition(self, ch):
-        clips = self.catalog.reference_clips(ch)
+    def _condition(self, clips):
+        import soxr
         audio = []
         for p in clips:
             x, sr = sf.read(p, dtype="float32", always_2d=False)
-            audio += [x, np.zeros(int(sr * 0.25), dtype="float32")]
+            audio += [soxr.resample(x, sr, SR), np.zeros(SR // 4, dtype="float32")]
         fd, path = tempfile.mkstemp(suffix=".wav")
         os.close(fd)
         try:
-            sf.write(path, np.concatenate(audio), sr)
-            self.model.prepare_conditionals(path, exaggeration=0.5)
+            sf.write(path, np.concatenate(audio), SR)
+            self.model.prepare_conditionals(path)
             return self.model.conds
         finally:
             os.remove(path)
 
     def say(self, line):
-        """Render one line and queue it for playback. Returns a dict of what happened and timings."""
+        """Render one line and stream it to the player. Returns what happened, with timings.
+        info["t_first_audio"] is the perf_counter time the first audio reached the player."""
+        from streaming import stream
+        import soxr
         t0 = time.perf_counter()
         text = speakable(line.text)
         info = {"speaker": line.speaker, "text": line.text, "source": None, "render_s": 0.0}
         if text is None:
             info["source"] = "action"
             return info
-        sim, rec = self.catalog.nearest(line.speaker, text)
+        plain = re.sub(r"\[[^\]]*\]", "", text).strip()
+        sim, rec = self.catalog.nearest(line.speaker, plain)
         info["match"] = round(sim, 3)
+        emotion = emotion_for(line.delivery)
+        cond = self.conds.get((line.speaker, emotion)) or self.conds.get((line.speaker, "neutral"))
         if sim >= RECORDING_MATCH:
             x, sr = sf.read(FACADE / rec["audio"], dtype="float32")
-            info.update(source="recording", recording=rec["id"], audio_s=len(x) / sr)
-        elif line.speaker in self.conds:
-            self.model.conds = self.conds[line.speaker]
-            wav = self._generate(text, line.delivery)
-            x, sr = wav.squeeze(0).cpu().numpy(), self.model.sr
-            info.update(source="synth", audio_s=len(x) / sr)
+            x = soxr.resample(x, sr, SR)
+            info["t_first_audio"] = time.perf_counter()
+            self.player.push(x)
+            info.update(source="recording", recording=rec["id"], audio_s=len(x) / SR)
+        elif cond is not None:
+            self.model.conds = cond
+            tagged = f"{style_tag(line.delivery)} {text}".strip()
+            total = 0
+            for chunk in stream(self.model, tagged):
+                if "t_first_audio" not in info:
+                    info["t_first_audio"] = time.perf_counter()
+                self.player.push(chunk)
+                total += len(chunk)
+            info.update(source="synth", emotion=emotion, tagged=tagged, audio_s=total / SR)
         else:
             info["source"] = "subtitle"
             return info
         info["render_s"] = time.perf_counter() - t0
-        self.out.put((x, sr))
         return info
 
-    def _play_loop(self):
-        while True:
-            x, sr = self.out.get()
-            sd.play(x, sr)
-            sd.wait()
-            self.out.task_done()
-
     def wait(self):
-        self.out.join()
+        self.player.wait()

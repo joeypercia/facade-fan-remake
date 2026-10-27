@@ -1,0 +1,47 @@
+:root {
+  --ink: #f3ece2;
+  --muted: #b7ab9b;
+  --panel: rgba(18, 14, 12, 0.78);
+  --accent: #e0a458;
+  --grace: #f0b9a8;
+  --trip: #a9c4e8;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; overflow: hidden; background: #120e0c; color: var(--ink);
+  font-family: Georgia, "Times New Roman", serif; }
+#view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+
+.overlay { position: fixed; inset: 0; display: grid; place-items: center; background: rgba(10, 8, 7, 0.82); z-index: 10; padding: 16px; }
+.overlay[hidden] { display: none; }
+.card { max-width: 440px; width: 100%; background: var(--panel); border: 1px solid #3a3029; padding: 28px; border-radius: 10px; }
+.card h1 { margin: 0; font-size: 44px; font-weight: normal; letter-spacing: 0.04em; }
+.card .sub { margin: 4px 0 22px; color: var(--muted); font-style: italic; }
+.card label { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 10px 0; }
+.card input, .card select { font: inherit; background: #221b17; color: var(--ink); border: 1px solid #4a3d33; border-radius: 6px; padding: 6px 10px; width: 60%; }
+.card button { margin-top: 18px; width: 100%; font: inherit; font-size: 18px; padding: 12px; border-radius: 8px; border: 0;
+  background: var(--accent); color: #1b130d; cursor: pointer; }
+.card button:disabled { opacity: 0.6; cursor: progress; }
+.hint, .credit { color: var(--muted); font-size: 13px; line-height: 1.5; }
+.credit { font-size: 11px; margin-bottom: 0; }
+
+#beat { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); color: var(--muted); font-style: italic;
+  font-size: 14px; opacity: 0; transition: opacity 1.2s; pointer-events: none; }
+#beat.show { opacity: 1; }
+
+#subtitles { position: fixed; left: 50%; bottom: 86px; transform: translateX(-50%); width: min(820px, calc(100% - 32px));
+  text-align: center; pointer-events: none; display: flex; flex-direction: column; gap: 4px; }
+#subtitles .line { background: var(--panel); padding: 8px 14px; border-radius: 6px; font-size: 20px; line-height: 1.35;
+  transition: opacity 0.6s; }
+#subtitles .line b { font-variant: small-caps; margin-right: 6px; }
+#subtitles .line.grace b { color: var(--grace); }
+#subtitles .line.trip b { color: var(--trip); }
+#subtitles .line.player { color: var(--muted); font-style: italic; }
+#subtitles .line.fade { opacity: 0; }
+#subtitles .stage { color: var(--muted); font-style: italic; }
+
+#thinking { position: fixed; bottom: 60px; left: 50%; transform: translateX(-50%); color: var(--muted); font-size: 22px; }
+
+#talk { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); width: min(820px, calc(100% - 32px)); }
+#say { width: 100%; font: inherit; font-size: 18px; padding: 10px 14px; border-radius: 8px; border: 1px solid #4a3d33;
+  background: rgba(20, 16, 14, 0.88); color: var(--ink); outline: none; }
+#say:focus { border-color: var(--accent); }

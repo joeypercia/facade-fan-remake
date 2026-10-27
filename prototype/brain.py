@@ -6,6 +6,7 @@ The model answers in a line format that can be parsed while it streams:
     BEAT|done
 """
 import json
+import random
 import re
 import time
 from dataclasses import dataclass
@@ -15,12 +16,16 @@ import requests
 from config import LLM_URL
 from story import BEATS, CHARACTERS, SETTING
 
+MIN_TURNS_PER_BEAT = 4
+
 FORMAT = """Write what Grace and Trip say and do next, as a short stretch of a stage play.
 Output ONLY lines in this exact format, one per line, nothing else:
 SPEAKER|delivery|text
 - SPEAKER is TRIP or GRACE.
 - delivery is one or two words of acting direction (warm, dry, forced cheer, pointed, hurt...).
 - text is what they say aloud. Stage business goes in *asterisks* inside the text, e.g. *gestures at the bar*.
+- Audible sounds may go inline where they happen, sparingly: [sigh] [laugh] [chuckle] [gasp] [groan] [sniff] [clear throat].
+  Example: GRACE|weary|[sigh] Trip, please. Not tonight.
 Keep each line short and natural, like real speech: usually one or two sentences.
 Write 2 to 4 lines, then stop. If the beat's goal has been reached, add a final line: BEAT|done"""
 
@@ -41,12 +46,15 @@ class Brain:
         self.player = player_name
         self.pronouns = pronouns
         self.history = []  # tonight only: never saved
+        self.seed = random.randrange(1 << 30)  # a different set of example lines each evening
 
     def system_prompt(self):
         b = self.beat
         examples = []
         for ch in ("trip", "grace"):
-            ex = self.catalog.examples(b["examples_from"], ch, n=5, seed=len(self.history))
+            # Same examples all evening: an unchanged prompt prefix lets the server reuse its
+            # cache, so each turn only processes the new exchange (~0.02 s vs ~0.8 s to first token).
+            ex = self.catalog.examples(b["examples_from"], ch, n=5, seed=self.seed)
             examples.append(f"{ch.upper()} sounds like:\n" + "\n".join(f"  - {e}" for e in ex))
         return "\n\n".join([
             SETTING,
@@ -65,10 +73,20 @@ class Brain:
             FORMAT,
         ])
 
-    def turn(self, player_input):
-        """Yield Line objects as soon as each one finishes streaming."""
+    def prime(self):
+        """Process the evening's system prompt once up front, so the first turn hits the cache."""
+        requests.post(LLM_URL, timeout=120, json={
+            "messages": [{"role": "system", "content": self.system_prompt()}, {"role": "user", "content": "."}],
+            "max_tokens": 1, "chat_template_kwargs": {"enable_thinking": False},
+        }).raise_for_status()
+
+    def turn(self, player_input, note=None):
+        """Yield Line objects as soon as each one finishes streaming.
+        `note` is extra context for this request only; it isn't kept in the history."""
         self.history.append({"role": "user", "content": f"{self.player.upper()}: {player_input}"})
         messages = [{"role": "system", "content": self.system_prompt()}] + self.history[-12:]
+        if note:
+            messages[-1] = {"role": "user", "content": f"{messages[-1]['content']}\n\n[{note}]"}
         t0 = time.perf_counter()
         resp = requests.post(LLM_URL, stream=True, timeout=120, json={
             "messages": messages,
@@ -82,6 +100,7 @@ class Brain:
         })
         resp.raise_for_status()
         buf, said = "", []
+        self._spoke_this_turn = False
         self.t_first_token = None
         for raw in resp.iter_lines():
             if not raw.startswith(b"data: ") or raw == b"data: [DONE]":
@@ -134,11 +153,19 @@ class Brain:
         # An ellipsis is a trailing-off pause inside a line, not a sentence end.
         sentences = re.split(r"(?<=[.!?])(?<!\.\.\.)\s+", text)
         done, rest = (sentences, "") if final else (sentences[:-1], sentences[-1])
+        if not final and not done and not self._spoke_this_turn:
+            # Nothing voiced yet this turn: a first clause of 4+ words is worth sending early.
+            for m in re.finditer(r"\S[,;:—]\s+(?=\S)", rest):
+                head = rest[:m.start() + 2]
+                if len(head.split()) >= 4:
+                    done, rest = [head], rest[m.end():]
+                    break
         lines = []
         for s in done:
             if s.strip():
                 lines.append(Line(speaker, delivery, s.strip(), time.perf_counter() - t0, continued))
                 continued = True
+                self._spoke_this_turn = True
         if final:
             self._cont = None
             return lines, ""
@@ -150,7 +177,10 @@ class Brain:
     def _parse(self, row, t0):
         parts = row.strip().split("|", 2)
         if len(parts) == 2 and parts[0].upper() == "BEAT":
-            self.beat_done = True
+            # The model tends to call the beat over too soon. Until there's a real beat
+            # sequencer, only accept it after a few exchanges.
+            guest_turns = sum(1 for m in self.history if m["role"] == "user")
+            self.beat_done = guest_turns >= MIN_TURNS_PER_BEAT
             return None
         if len(parts) != 3 or parts[0].upper() not in ("TRIP", "GRACE"):
             return None

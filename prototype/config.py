@@ -15,9 +15,6 @@ LLM_MODEL = os.environ.get("FACADE_LLM_MODEL", r"G:\AI\models\Qwen3-8B-Q4_K_M.gg
 # they then speak only in original recordings, with subtitles for lines that weren't recorded.
 VOICE_SYNTHESIS = {"grace": True, "trip": True}
 
-# "turbo" (fast, no expressiveness control) or "standard" (slower, delivery sets expressiveness).
-TTS_ENGINE = os.environ.get("FACADE_TTS", "turbo")
-
 # Play an original recording instead of synthesizing when one is at least this similar (cosine)
 # to the planned line. 1.0 disables reuse (always synthesize).
 RECORDING_MATCH = float(os.environ.get("FACADE_RECORDING_MATCH", "0.92"))

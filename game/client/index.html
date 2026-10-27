@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Façade Remastered</title>
+<link rel="stylesheet" href="/client/style.css">
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<canvas id="view"></canvas>
+
+<div id="start" class="overlay">
+  <div class="card">
+    <h1>Façade</h1>
+    <p class="sub">Remastered · a one-act interactive drama</p>
+    <label>Your name <input id="name" value="Joe" maxlength="30" autocomplete="off"></label>
+    <label>Your pronouns
+      <select id="pronouns">
+        <option>they/them</option><option>she/her</option><option>he/him</option>
+      </select>
+    </label>
+    <button id="knock">Knock on the door</button>
+    <p class="hint">Type to talk at any time. Put actions in asterisks: <em>*hugs Grace*</em>.<br>
+      Arrow keys or WASD to move, drag to look around.</p>
+    <p class="credit">Façade © 2005–2006 Procedural Arts (Michael Mateas, Andrew Stern).
+      Voices: Chloe Johnston (Grace), Andy Bayiates (Trip). Fan remaster, not affiliated.</p>
+  </div>
+</div>
+
+<div id="beat"></div>
+<div id="subtitles"></div>
+<div id="thinking" hidden>…</div>
+
+<form id="talk" autocomplete="off">
+  <input id="say" placeholder="Say something, or *do something*…" disabled>
+</form>
+
+<div id="end" class="overlay" hidden>
+  <div class="card"><h1 id="end-title">The evening is over</h1>
+    <p class="sub">Every evening is different. Reload to visit again.</p></div>
+</div>
+
+<script type="module" src="/client/main.js"></script>
+</body>
+</html>

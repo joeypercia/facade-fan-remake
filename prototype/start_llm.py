@@ -15,7 +15,8 @@ cmd = [
     "-fa", "on",             # flash attention
     "--jinja",               # use the model's chat template (needed for enable_thinking=False)
     "--reasoning", "off",    # no hidden thinking pass: it would add seconds before the first line
-    "--cache-reuse", "256",  # reuse the shared system-prompt prefix between turns
+    # Plain prefix caching (on by default) reuses the system prompt between turns. Don't add
+    # --cache-reuse: its KV shifting replayed stale chunks and made replies repeat verbatim.
     "-np", "1",
 ]
 print(" ".join(cmd))

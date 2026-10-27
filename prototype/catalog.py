@@ -19,15 +19,22 @@ class Catalog:
         random.Random(seed).shuffle(pool)
         return [l["text"] for l in pool[:n]]
 
-    def reference_clips(self, character, seconds=12.0):
-        """Paths to a few longer, calm recordings for voice conditioning."""
+    def reference_clips(self, character, directions, avoid=(), seconds=12.0):
+        """Paths to a few longer recordings marked with any of `directions` (NEUTRAL also matches
+        takes with no direction at all), skipping any marked with `avoid`."""
         import soundfile as sf
-        calm = [l for l in self.lines if l["character"] == character and l["audio"]
-                and not set(l["direction"]) & {"SCREAM", "YELL", "ANGRY", "MUTED", "OFFSCREEN", "CRY", "SOB"}
-                and len(l["text"]) > 60]
-        random.Random(7).shuffle(calm)
+
+        def fits(l):
+            d = set(l["direction"])
+            if d & set(avoid):
+                return False
+            return bool(d & set(directions)) or ("NEUTRAL" in directions and not d)
+
+        pool = [l for l in self.lines if l["character"] == character and l["audio"]
+                and len(l["text"]) > 40 and fits(l)]
+        random.Random(7).shuffle(pool)
         picked, total = [], 0.0
-        for l in calm:
+        for l in pool:
             path = FACADE / l["audio"]
             info = sf.info(path)
             if 2.5 < info.duration < 7:

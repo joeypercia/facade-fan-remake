@@ -7,6 +7,7 @@
 Needs llama-server running (see prototype/README.md).
 """
 import argparse
+import os
 import queue
 import re
 import statistics
@@ -39,30 +40,50 @@ def split_sentences(line):
     return [Line(line.speaker, line.delivery, p, line.t_ready) for p in parts]
 
 
-def run_turn(brain, voices, text, verbose=True):
+class VoiceThread:
+    """One long-lived thread voices every line, in order. (A new thread per turn costs ~1 s:
+    PyTorch sets up its CUDA handles per thread on first use.)"""
+
+    def __init__(self, voices):
+        self.voices = voices
+        self.todo = queue.Queue()
+        self.ready = threading.Event()
+        threading.Thread(target=self._run, daemon=True).start()
+        self.ready.wait()
+
+    def _run(self):
+        self.voices.warm_thread()  # pay this thread's one-time GPU setup now, not on the first line
+        self.ready.set()
+        while True:
+            line, t0, out, done = self.todo.get()
+            if line is None:
+                done.set()
+                continue
+            t_say = time.perf_counter() - t0
+            info = self.voices.say(line)
+            info["t_say"] = t_say
+            if "t_first_audio" in info and out["first_audio"] is None:
+                out["first_audio"] = info["t_first_audio"] - t0
+                if os.environ.get("FACADE_TRACE"):
+                    print(f"    trace: ready {line.t_ready:.2f}s, voicing from {t_say:.2f}s, audio at "
+                          f"{out['first_audio']:.2f}s ({info['source']}, {info.get('emotion')}, {line.text[:40]!r})")
+            out["results"].append((line, info))
+
+
+def run_turn(brain, voice_thread, text, verbose=True):
     """One exchange. Lines are voiced as they stream in, so the first one plays while the rest generate."""
     t0 = time.perf_counter()
-    results, first_audio = [], [None]
-    todo = queue.Queue()
-
-    def voice_worker():
-        # One worker, in order, so playback order matches the script.
-        while (line := todo.get()) is not None:
-            info = voices.say(line)
-            if info["source"] in ("recording", "synth") and first_audio[0] is None:
-                first_audio[0] = time.perf_counter() - t0
-            results.append((line, info))
-
-    worker = threading.Thread(target=voice_worker)
-    worker.start()
+    out = {"results": [], "first_audio": None}
+    done = threading.Event()
     for line in brain.turn(text):
         if verbose:
             print(f"  {line.speaker.upper():5} ({line.delivery}) {line.text}")
         # Voice sentence by sentence: a short first sentence gets audio out sooner.
         for part in split_sentences(line):
-            todo.put(part)
-    todo.put(None)
-    worker.join()
+            voice_thread.todo.put((part, t0, out, done))
+    voice_thread.todo.put((None, t0, out, done))
+    done.wait()
+    results, first_audio = out["results"], [out["first_audio"]]
     llm_first_line = min((l.t_ready for l, _ in results), default=None)
     return {
         "llm_first_token": brain.t_first_token,
@@ -84,23 +105,20 @@ def main():
     args = ap.parse_args()
 
     catalog = Catalog()
-    voices = Voices(catalog)
+    voices = Voices(catalog, mute=args.mute)
     t = time.perf_counter()
     voices.load()
-    catalog.nearest("trip", "warm up")
+    voice_thread = VoiceThread(voices)
     print(f"voices ready in {time.perf_counter() - t:.1f}s")
-    if args.mute:
-        import sounddevice as sd
-        sd.play = lambda *a, **k: None
-        sd.wait = lambda: None
 
     brain = Brain(catalog, args.beat, args.name, args.pronouns)
+    brain.prime()
     inputs = BENCH_INPUTS if args.bench else iter(lambda: input(f"\n{args.name.upper()}> ").strip(), "")
     stats = []
     for text in inputs:
         if args.bench:
             print(f"\n{args.name.upper()}> {text}")
-        s = run_turn(brain, voices, text)
+        s = run_turn(brain, voice_thread, text)
         stats.append(s)
         print(f"  [first token {s['llm_first_token']:.2f}s | first sentence {s['llm_first_line']:.2f}s"
               f" | first audio {s['first_audio'] or float('nan'):.2f}s | {s['sources']}]")

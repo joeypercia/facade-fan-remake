@@ -23,10 +23,11 @@ Early development. The working pieces so far:
 | Asset guard: blocks commits that contain original assets | working |
 | Animation decoding: clip index, joint-position frames, performance scripts | working |
 | Apartment layout: all 127 walls and props, with positions | working |
-| Character drawing rules (the engine has no mesh files) | in progress |
-| Renderer (HD, widescreen, fullscreen) | planned |
-| Drama manager on a local LLM | planned |
-| Voice: original recordings, plus voice synthesis for new lines | planned |
+| **Playable evening**: all twelve beats, free-text input, ending ([game/](game/README.md)) | first playable |
+| Drama manager on a local LLM: beat sequencer, tonight's memory, control cues | working |
+| Voices: original recordings when they fit, streamed expressive synthesis otherwise | working |
+| Renderer: apartment from the original layout and textures, characters from original animation | placeholder art |
+| Character models and lip sync (the engine has no mesh files) | planned |
 
 The full plan is in [docs/DESIGN.md](docs/DESIGN.md). Notes on the original file formats are in
 [docs/ASSETS.md](docs/ASSETS.md).
