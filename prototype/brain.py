@@ -1,0 +1,157 @@
+"""The drama brain: prompts the local LLM for one exchange in the current beat and streams lines out.
+
+The model answers in a line format that can be parsed while it streams:
+    TRIP|cheerful|Line of dialogue.
+    GRACE|dry|Line of dialogue.
+    BEAT|done
+"""
+import json
+import re
+import time
+from dataclasses import dataclass
+
+import requests
+
+from config import LLM_URL
+from story import BEATS, CHARACTERS, SETTING
+
+FORMAT = """Write what Grace and Trip say and do next, as a short stretch of a stage play.
+Output ONLY lines in this exact format, one per line, nothing else:
+SPEAKER|delivery|text
+- SPEAKER is TRIP or GRACE.
+- delivery is one or two words of acting direction (warm, dry, forced cheer, pointed, hurt...).
+- text is what they say aloud. Stage business goes in *asterisks* inside the text, e.g. *gestures at the bar*.
+Keep each line short and natural, like real speech: usually one or two sentences.
+Write 2 to 4 lines, then stop. If the beat's goal has been reached, add a final line: BEAT|done"""
+
+
+@dataclass
+class Line:
+    speaker: str
+    delivery: str
+    text: str
+    t_ready: float  # seconds since the request started
+    part_of_previous: bool = False  # a later sentence of the same line
+
+
+class Brain:
+    def __init__(self, catalog, beat_id, player_name="the guest", pronouns="they/them"):
+        self.catalog = catalog
+        self.beat = BEATS[beat_id]
+        self.player = player_name
+        self.pronouns = pronouns
+        self.history = []  # tonight only: never saved
+
+    def system_prompt(self):
+        b = self.beat
+        examples = []
+        for ch in ("trip", "grace"):
+            ex = self.catalog.examples(b["examples_from"], ch, n=5, seed=len(self.history))
+            examples.append(f"{ch.upper()} sounds like:\n" + "\n".join(f"  - {e}" for e in ex))
+        return "\n\n".join([
+            SETTING,
+            f"GRACE: {CHARACTERS['grace']}",
+            f"TRIP: {CHARACTERS['trip']}",
+            f"The guest is called {self.player} and uses {self.pronouns} pronouns. "
+            f"When Grace or Trip refer to {self.player}, always use {self.pronouns}.",
+            f"CURRENT BEAT: {b['title']}. {b['situation']}\n"
+            f"Trip wants: {b['goals']['trip']}\nGrace wants: {b['goals']['grace']}\n"
+            f"The beat ends when: {b['ends_when']}",
+            "Original lines from this moment, for voice and tone only (do not repeat them verbatim):\n"
+            + "\n\n".join(examples),
+            "React specifically to what the guest just said or did. Stay in this beat. "
+            "Every line must be new: never reuse a line or phrase either of them already said tonight. "
+            "Keep track of what each person has already ordered or refused.",
+            FORMAT,
+        ])
+
+    def turn(self, player_input):
+        """Yield Line objects as soon as each one finishes streaming."""
+        self.history.append({"role": "user", "content": f"{self.player.upper()}: {player_input}"})
+        messages = [{"role": "system", "content": self.system_prompt()}] + self.history[-12:]
+        t0 = time.perf_counter()
+        resp = requests.post(LLM_URL, stream=True, timeout=120, json={
+            "messages": messages,
+            "stream": True,
+            "temperature": 0.8,
+            "top_p": 0.9,
+            "presence_penalty": 0.4,
+            "frequency_penalty": 0.3,
+            "max_tokens": 300,
+            "chat_template_kwargs": {"enable_thinking": False},
+        })
+        resp.raise_for_status()
+        buf, said = "", []
+        self.t_first_token = None
+        for raw in resp.iter_lines():
+            if not raw.startswith(b"data: ") or raw == b"data: [DONE]":
+                continue
+            delta = json.loads(raw[6:])["choices"][0]["delta"].get("content") or ""
+            if delta and self.t_first_token is None:
+                self.t_first_token = time.perf_counter() - t0
+            buf += delta
+            while "\n" in buf:
+                row, buf = buf.split("\n", 1)
+                lines, _ = self._emit(row, t0, final=True)
+                said += lines
+                yield from lines
+            # Hand over finished sentences of the line still streaming, so the voice can start early.
+            lines, buf = self._emit(buf, t0, final=False)
+            said += lines
+            yield from lines
+        lines, _ = self._emit(buf, t0, final=True)
+        said += lines
+        yield from lines
+        # History keeps whole lines: rejoin the sentence fragments of each line.
+        merged = []
+        for l in said:
+            if merged and l.part_of_previous:
+                merged[-1] = (merged[-1][0], merged[-1][1], merged[-1][2] + " " + l.text)
+            else:
+                merged.append((l.speaker, l.delivery, l.text))
+        self.history.append({"role": "assistant", "content": "\n".join("|".join(m) for m in merged)})
+
+    def _emit(self, row, t0, final):
+        """Split `row` (one output line, possibly still streaming) into sentence Lines.
+
+        Returns (lines, remainder). When not final, the last, unfinished sentence comes back as
+        the remainder for the caller to keep buffering. Once part of a line has been emitted,
+        its remainder no longer carries the SPEAKER|delivery| header; self._cont remembers it.
+        """
+        parts = row.split("|", 2)
+        has_header = len(parts) == 3 and parts[0].strip().upper() in ("TRIP", "GRACE")
+        cont = getattr(self, "_cont", None)
+        if not has_header and cont is None:
+            if final:
+                self._parse(row, t0)  # control lines such as BEAT|done
+                return [], ""
+            return [], row
+        if has_header:
+            speaker, delivery, text = parts[0].strip().lower(), parts[1].strip(), parts[2]
+            prefix, continued = f"{parts[0]}|{parts[1]}|", False
+        else:
+            (speaker, delivery), text, prefix, continued = cont, row, "", True
+        # An ellipsis is a trailing-off pause inside a line, not a sentence end.
+        sentences = re.split(r"(?<=[.!?])(?<!\.\.\.)\s+", text)
+        done, rest = (sentences, "") if final else (sentences[:-1], sentences[-1])
+        lines = []
+        for s in done:
+            if s.strip():
+                lines.append(Line(speaker, delivery, s.strip(), time.perf_counter() - t0, continued))
+                continued = True
+        if final:
+            self._cont = None
+            return lines, ""
+        if lines:
+            self._cont = (speaker, delivery)
+            prefix = ""
+        return lines, prefix + rest
+
+    def _parse(self, row, t0):
+        parts = row.strip().split("|", 2)
+        if len(parts) == 2 and parts[0].upper() == "BEAT":
+            self.beat_done = True
+            return None
+        if len(parts) != 3 or parts[0].upper() not in ("TRIP", "GRACE"):
+            return None
+        return Line(parts[0].lower(), parts[1].strip(), parts[2].strip(), time.perf_counter() - t0)
