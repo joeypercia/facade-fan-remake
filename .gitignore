@@ -1,0 +1,23 @@
+# Anything derived from the original game stays on the player's machine.
+data/
+cache/
+*.wav
+*.spk
+*.mp3
+*.bmp
+*.ico
+*.abinary
+*.sbinary
+*.aindex
+*.class
+*.jar
+*.dll
+
+# Tooling
+node_modules/
+dist/
+out/
+__pycache__/
+*.pyc
+.venv/
+.env
