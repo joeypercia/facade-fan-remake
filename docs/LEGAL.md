@@ -29,16 +29,13 @@ IDs, which are structural labels. They never quote dialogue.
 ## Voices
 
 New lines are spoken in Grace's and Trip's voices, synthesized locally from the original
-recordings. The project maintainer has the consent of the original voice actors to do this as part
-of this non-commercial mod. To respect the spirit of that consent:
+recordings.
 
 - Voice synthesis runs only inside the game, for lines Grace or Trip speak in a scene. There is no
   general "say anything in this voice" tool, command or API.
 - Reference audio is read from the player's own install. Nothing derived from it is cached in a
   shareable form, uploaded, or committed.
 - No voice models, fine-tunes or speaker embeddings are ever published.
-- If an actor withdraws consent, synthesis of their voice is removed. The game then uses their
-  original recordings only, with subtitles for new lines.
 
 ## Original credits
 
