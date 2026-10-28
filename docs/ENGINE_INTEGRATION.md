@@ -89,6 +89,22 @@ A 4-minute session with the observe-only bridge (991 calls) showed:
 7. **Latency.** The engine plays a line's audio as one file, so the next line is generated while
    the current one plays.
 
+## GPU memory budget (12 GB card)
+
+Measured 2026-10-27 with `engine/service/measure_vram.py`, each piece alone:
+
+| Piece | Now | Cheaper setting | After |
+|---|---|---|---|
+| LLM, Qwen3-8B Q4_K_M | 6.1 GB (8K context, fp16 KV cache) | 4K context, 8-bit KV cache (`-c 4096 -ctk q8_0 -ctv q8_0`); same output, 0.33 s vs 0.40 s per line | 5.4 GB |
+| Voice, Chatterbox Turbo | 3.0 GB (fp32) | fp16 weights (1.4 GB allocated vs 2.7; render 2.1 s vs 1.9 s). Convert on the CPU before moving to the GPU, or the fp32 load sets the peak. | ~1.6 GB |
+| Line matcher (bge-small) and per-thread CUDA setup | ~1 GB | embedder on the CPU | ~0.3 GB |
+| **Total** | **~10 GB** | | **~7.3 GB** |
+
+Façade and everyday desktop apps (browser, chat, audio tools) take another 1-2 GB, so at ~10 GB the card
+was full: Windows spilled GPU memory into system RAM and every LLM call timed out (the "delays, no
+answers" session). The cheaper settings leave ~3.5-4 GB of headroom. If that's not enough, Qwen3-4B
+(~2.5 GB download) would bring the total to ~4.5 GB at the cost of weaker writing.
+
 ## Unknowns
 
 - How the in-memory script table is laid out, and whether adding a record at runtime is safe.
