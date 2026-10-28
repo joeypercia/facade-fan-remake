@@ -81,6 +81,7 @@ class Performance:
 
 
 PHONEMES = range(31, 71)  # phoneme codes; cue ids are below 31
+PHONEME_START = 70        # opens a phrase
 
 
 def _parse_speech(args, perf):
@@ -115,6 +116,20 @@ def _parse_speech(args, perf):
                 break
     i += 2  # END, script index
     perf.text = "".join(chr(c) for c in args[i:args.index(END, i)])
+
+
+def read_records_raw(facade, char):
+    """{script index: (record order, [tokens from REC_START up to and including BODY_END])}.
+    Record order is the position in the file, which is how the engine's in-memory table is indexed."""
+    toks = np.fromfile(anim_dir(facade, char) / f"{char}Script.sbinary", "<i4").tolist()
+    starts = [k for k, t in enumerate(toks) if t == REC_START]
+    out = {}
+    for order, (s, e) in enumerate(zip(starts, starts[1:] + [len(toks)])):
+        rec = toks[s:e]
+        if rec[1] == EOF_ID:
+            break
+        out[rec[1]] = (order, rec[:rec.index(BODY_END) + 1])
+    return out
 
 
 def read_sbinary(facade, char):

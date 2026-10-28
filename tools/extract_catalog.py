@@ -122,8 +122,13 @@ def build(facade):
             if not m:
                 continue
             direction, tokens = split_direction(m["rest"])
-            wav = recordings.get(value)
             perf = perfs.get(value)
+            # The engine plays file (speech block's first field + 1), not the script number
+            # (confirmed against the files it opens in logged sessions).
+            if perf and perf.base_frame is not None:
+                wav = recordings.get(perf.base_frame + 1)
+            else:
+                wav = None
             lines.append({
                 "id": f"{char}:{value}",
                 "character": char,

@@ -13,6 +13,7 @@
 #include <jni.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <string>
 
 static HMODULE g_self, g_orig;
 static CRITICAL_SECTION g_lock;
@@ -63,6 +64,12 @@ static void logf(const char *fmt, ...) {
 
 static void engine_attach();
 static void autopilot_attach(HMODULE eng);
+// inject.cpp: generated lines
+static int generated_line(int ch, int s1, int s2, int s3, int s4);
+static void report_heard(const char *text);
+static const char *redirect_wav(const char *name, std::string &keep);
+static void restore_lines(int ch);
+static void inject_attach();
 
 BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
@@ -113,7 +120,10 @@ static CreateFileAFn real_CreateFileA;
 static void note_open(const char *name);
 
 static void *WINAPI hook_mmioOpenA(LPSTR name, void *info, DWORD flags) {
-    void *h = real_mmioOpenA(name, info, flags);
+    std::string keep;
+    const char *use = redirect_wav(name, keep);  // a generated line's voice, if one is queued
+    void *h = real_mmioOpenA((LPSTR)use, info, flags);
+    if (!h && use != name) h = real_mmioOpenA(name, info, flags);  // generated file unreadable: original
     note_open(name);
     logf("mmioOpenA \"%s\" flags=0x%lx -> %p", name ? name : "(null)", flags, h);
     return h;
@@ -134,6 +144,7 @@ static void engine_attach() {
     logf("engine: hooks mmioOpenA=%s CreateFileA=%s", real_mmioOpenA ? "on" : "MISSING",
          real_CreateFileA ? "on" : "MISSING");
     autopilot_attach(eng);  // only does anything in automated test runs
+    inject_attach();
 }
 
 // --- memory scan: where does the engine keep line 1055 (Trip, "Where are the new wine glasses?")?
@@ -268,6 +279,10 @@ JNI_FN(void, pushAnimationUScript, jint ch, jint script, jint layer, jobject act
 }
 JNI_FN(void, pushMultipleAnimationScripts, jint ch, jint s1, jint s2, jint s3, jint s4, jint layer, jobject act) {
     logf("pushMultipleAnimationScripts ch=%d scripts=%d,%d,%d,%d layer=%d", ch, s1, s2, s3, s4, layer);
+    if (layer == 7) {  // speech: let the line service write this line, if it's running
+        int g = generated_line(ch, s1, s2, s3, s4);
+        if (g > 0) { s1 = g; s2 = s3 = s4 = -1; }
+    }
     CALL(void, pushMultipleAnimationScripts, 36, (JNIEnv *, jclass, jint, jint, jint, jint, jint, jint, jobject),
          env, cls, ch, s1, s2, s3, s4, layer, act);
 }
@@ -342,6 +357,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_facade_nativeinterface_NativeAnimation
     if (s) {
         const char *t = env->GetStringUTFChars(s, NULL);
         if (t && *t) logf("textSensor \"%s\"", t);
+        if (t && *t) report_heard(t);
         if (t) env->ReleaseStringUTFChars(s, t);
     }
     return s;
@@ -355,9 +371,10 @@ __declspec(dllexport) bool AblCallbackAPI_PlayerEnteredText(char *const text) {
 }
 __declspec(dllexport) bool AblCallbackAPI_ScriptFinished(int ch, int script) {
     logf("ScriptFinished ch=%d script=%d", ch, script);
-    scan_once();  // by now the engine has loaded and played at least one line
+    if (script == 7) restore_lines(ch);  // (the second argument is the layer; 7 = speech)
     static bool(*f)(int, int) = (bool (*)(int, int))orig("?AblCallbackAPI_ScriptFinished@@YA_NHH@Z");
     return f(ch, script);
 }
 
 #include "autopilot.cpp"
+#include "inject.cpp"

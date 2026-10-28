@@ -19,6 +19,7 @@
 // t is seconds after start, or after an anchor: the first time the engine opens a file whose
 // name contains `anchor` (e.g. "@tr_intro_end+12" = 12 s after the title music's last cue).
 struct Step { double t; std::string anchor, action, arg; };
+static DWORD g_t0;
 static std::vector<std::pair<std::string, double>> g_opened;  // (file, seconds) as the engine opens them
 static CRITICAL_SECTION g_opened_lock;
 
@@ -36,7 +37,6 @@ static double anchor_time(const std::string &a) {  // -1 until it has happened
     return t;
 }
 static std::vector<Step> g_steps;
-static DWORD g_t0;
 static HWND g_main;
 static volatile LONG g_shot;             // frames still to capture
 static double g_shot_every;

@@ -14,5 +14,5 @@ if not exist "%HERE%out" mkdir "%HERE%out"
 cl /nologo /LD /O2 /EHsc /MT /W3 /D_CRT_SECURE_NO_WARNINGS ^
    /I"%JDK%\include" /I"%JDK%\include\win32" ^
    "%HERE%bridge.cpp" /Fo"%HERE%out\\" /Fe"%HERE%out\nativeaniminterface.dll" ^
-   /link /DEF:"%HERE%bridge.def" user32.lib ole32.lib || exit /b 1
+   /link /DEF:"%HERE%bridge.def" user32.lib ole32.lib winhttp.lib || exit /b 1
 echo built %HERE%out\nativeaniminterface.dll
