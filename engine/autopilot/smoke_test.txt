@@ -1,0 +1,4 @@
+# Smoke test: the game starts and reaches the name box; the bridge's start-up patches are in the log.
+0 shots 10
+@tr_intro_end+32 key J 0.2
+@tr_intro_end+36 key RETURN 0.2

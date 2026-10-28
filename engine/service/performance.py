@@ -73,7 +73,8 @@ word: the single most stressed word of the line, where the gesture lands (copied
 look: guest (when talking to the guest), partner ({Partner}, when talking to them), or an object only
   if the line is about it: {objects}; or same.
 
-Example: skeptical | sigh laugh | production | partner"""
+Example, for the line "Oh God, don't make this into some big production.":
+skeptical | sigh laugh | production | partner"""
 
 
 def prompt(char):
@@ -101,7 +102,14 @@ def choose(char, text, direction, recent, timeout=2.5):
         reply = r.json()["choices"][0]["message"]["content"]
     except (requests.RequestException, ValueError, KeyError, IndexError):
         return {}
-    return parse(char, reply)
+    pick = parse(char, reply)
+    if pick and pick["word"] not in {w.lower() for w in re.findall(r"[A-Za-z']+", text)}:
+        pick["word"] = longest_word(text)  # not from the line (e.g. copied from the example)
+    return pick
+
+
+def longest_word(text):
+    return max(re.findall(r"[A-Za-z']+", text) or [""], key=len).lower()
 
 
 # Faces the model reaches for that aren't on the menu (it often echoes the line's direction).

@@ -221,6 +221,15 @@ static void scroll_text_box(HMODULE eng) {
     memcpy(was, call, 5);
     patch_bytes(call, was, rel, 5);                       // show the end of long text
     logf("engine: text box scrolls; typing up to 255 characters");
+
+    // Asterisks, for *actions*: the typing filter's punctuation test (+0xa19b0) accepts ! ? . , " ' ;
+    // : ( ) - and tests comma twice (comma is also a separator, +0xa1860). The second comma test
+    // (cmp eax, 2Ch at +0xa19e7) becomes cmp eax, 2Ah ('*').
+    static const BYTE comma[] = {0x83, 0xF8, 0x2C}, star[] = {0x83, 0xF8, 0x2A};
+    bool star_ok = patch_bytes(b + 0xa19e7, comma, star, 3);
+    typedef char(__cdecl * IsPunct)(char);
+    logf("engine: asterisks %s (filter says '*'=%d ','=%d 'x'=%d)", star_ok ? "allowed" : "NOT allowed (code differs)",
+         ((IsPunct)(b + 0xa19b0))('*'), ((IsPunct)(b + 0xa19b0))(','), ((IsPunct)(b + 0xa19b0))('x'));
 }
 
 // --- memory scan: where does the engine keep line 1055 (Trip, "Where are the new wine glasses?")?
