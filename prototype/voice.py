@@ -104,15 +104,16 @@ def quiet_engine():
 
 
 def load_fp16(engine_cls):
-    """Load Chatterbox Turbo in half precision: its two big parts are converted on the CPU before
-    they reach the GPU (loading straight to the GPU in fp32 would set the memory peak). About
-    1.4 GB of weights instead of 2.7. Generation runs under autocast so fp32 inputs meet fp16
-    weights; the small voice encoder stays fp32."""
+    """Load Chatterbox Turbo with its text-to-speech-token model (T3) in half precision, converted
+    on the CPU before it reaches the GPU (loading straight to the GPU in fp32 would set the memory
+    peak). T3 runs under autocast so fp32 inputs meet fp16 weights. The audio decoder (S3Gen) and
+    the voice encoder stay fp32: an fp16 decoder audibly garbled the speech (similarity to the
+    actor's voice 0.865 vs 0.899 in fp32). About 1.9 GB instead of 2.9."""
     import functools
     import torch
     m = engine_cls.from_pretrained(device="cpu")
     m.t3 = m.t3.half().to("cuda").eval()
-    m.s3gen = m.s3gen.half().to("cuda").eval()
+    m.s3gen = m.s3gen.to("cuda").eval()
     m.ve = m.ve.to("cuda").eval()
     # Inference only. With gradients on, every stored voice conditioning kept its whole autograd
     # history: ~136 MB each, 1.6 GB for the 12 voices.
@@ -123,16 +124,24 @@ def load_fp16(engine_cls):
         m.conds = m.conds.to("cuda")
     torch.cuda.empty_cache()
 
-    def amp(fn):
+    def no_grad(fn):
         @functools.wraps(fn)
         def run(*a, **k):
-            with torch.inference_mode(), torch.autocast("cuda", dtype=torch.float16):
+            with torch.inference_mode():
                 out = fn(*a, **k)
             return out.float() if torch.is_tensor(out) else out
         return run
 
-    m.generate = amp(m.generate)
-    m.prepare_conditionals = amp(m.prepare_conditionals)
+    t3_inference = m.t3.inference_turbo
+
+    @functools.wraps(t3_inference)
+    def t3_amp(*a, **k):
+        with torch.autocast("cuda", dtype=torch.float16):
+            return t3_inference(*a, **k)
+
+    m.t3.inference_turbo = t3_amp
+    m.generate = no_grad(m.generate)
+    m.prepare_conditionals = no_grad(m.prepare_conditionals)
     return m
 
 

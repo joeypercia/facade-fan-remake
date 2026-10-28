@@ -143,12 +143,25 @@ static HANDLE WINAPI hook_CreateFileA(LPCSTR name, DWORD access, DWORD share, LP
     return h;
 }
 
+// Diagnostics (FACADE_TIMING=1): voice-file streaming reads (slow frames: autopilot.cpp).
+typedef LONG(WINAPI *MmioReadFn)(void *, char *, LONG);
+static MmioReadFn real_mmioRead;
+static LONG WINAPI hook_mmioRead(void *h, char *buf, LONG n) {
+    LONG got = real_mmioRead(h, buf, n);
+    logf("mmioRead %p %ld -> %ld", h, n, got);
+    return got;
+}
+
 static void engine_attach() {
     // The engine DLL imports this bridge, so by the time we initialise its imports are bound.
     HMODULE eng = GetModuleHandleA("animEngineDLL.dll");
     if (!eng) { logf("engine: animEngineDLL.dll not loaded yet"); return; }
     real_mmioOpenA = (MmioOpenA)patch_iat(eng, "WINMM.dll", "mmioOpenA", (void *)hook_mmioOpenA);
     real_CreateFileA = (CreateFileAFn)patch_iat(eng, "KERNEL32.dll", "CreateFileA", (void *)hook_CreateFileA);
+    char timing[4];
+    if (GetEnvironmentVariableA("FACADE_TIMING", timing, sizeof timing)) {
+        real_mmioRead = (MmioReadFn)patch_iat(eng, "WINMM.dll", "mmioRead", (void *)hook_mmioRead);
+    }
     logf("engine: hooks mmioOpenA=%s CreateFileA=%s", real_mmioOpenA ? "on" : "MISSING",
          real_CreateFileA ? "on" : "MISSING");
     autopilot_attach(eng);  // only does anything in automated test runs

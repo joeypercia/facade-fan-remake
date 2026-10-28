@@ -147,6 +147,14 @@ autograd history (~1.6 GB in all). `load_fp16` now turns gradients off and runs 
 `torch.inference_mode`, and the 12 voices cost almost nothing. Lines took 1.3-2.8 s, and tone matching
 was unchanged (offscreen loudness 0.017 vs. the original take's 0.018).
 
+**Correction (2026-10-28):** the fp16 audio decoder (S3Gen) garbled the speech in play. Over six lines
+in Trip's voice, similarity to the actor's voice was 0.865, against 0.899 in fp32. Only the text model
+(T3) is fp16 now, under autocast. The decoder is fp32 again: 0.898, and 1.9 GB instead of 1.4 GB
+(`load_fp16` in `prototype/voice.py`). The stack peaks around +7.6 GB.
+
+`FACADE_TIMING=1` logs the engine's voice-file reads. Each file is read whole, not streamed. Automated
+runs also log frames slower than 100 ms. Neither showed a playback problem.
+
 ## Unknowns
 
 - How the in-memory script table is laid out, and whether adding a record at runtime is safe.

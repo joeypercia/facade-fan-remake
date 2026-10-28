@@ -235,6 +235,10 @@ static void save_frame() {
     logf("autopilot: frame %dx%d -> %s", w, h, file);
 }
 static BOOL WINAPI hook_SwapBuffers(HDC dc) {
+    static DWORD last;
+    DWORD now = GetTickCount();
+    if (last && now - last > 100) logf("autopilot: slow frame %lu ms", now - last);
+    last = now;
     if (g_shot_every > 0 && since() >= g_next_auto_shot) {
         g_next_auto_shot = since() + g_shot_every;
         InterlockedIncrement(&g_shot);
