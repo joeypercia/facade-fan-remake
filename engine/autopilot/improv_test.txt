@@ -1,0 +1,25 @@
+# Off-script test: in through the door, take the evening somewhere new (ghosts, *actions*), keep it
+# going for a few exchanges, then walk back out into the hallway and stay there (does someone follow?),
+# then come back in and talk about the apartment (does the story pick up again?). Frames every 3 s.
+0 shots 3
+@tr_intro_end+32 key J 0.2
+@tr_intro_end+36 key RETURN 0.2
+@tr_intro_end+50 key UP 1.5
+@tr_intro_end+100 key UP 2.5
+@tr_intro_end+110 say hi guys!
+@tr_intro_end+125 say do you guys believe in ghosts? I think this building is haunted
+@tr_intro_end+142 say *knocks on the wall three times* did you hear that? something knocked back
+@tr_intro_end+160 say I'm serious, let's have a seance. Grace, turn off the lights
+@tr_intro_end+178 say *starts juggling three oranges*
+@tr_intro_end+195 key DOWN 4
+@tr_intro_end+200 key DOWN 4
+@tr_intro_end+205 key DOWN 4
+@tr_intro_end+210 key DOWN 4
+@tr_intro_end+225 say come out here, I want to show you something in the hallway
+@tr_intro_end+250 say look, the elevator light is flickering. ghosts
+@tr_intro_end+275 say *sits down on the hallway floor* it's nice out here
+@tr_intro_end+300 key UP 4
+@tr_intro_end+305 key UP 4
+@tr_intro_end+310 key UP 4
+@tr_intro_end+320 say anyway, your apartment looks great
+@tr_intro_end+345 say I'd love a glass of wine

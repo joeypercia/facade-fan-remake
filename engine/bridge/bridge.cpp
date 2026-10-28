@@ -66,7 +66,13 @@ static void engine_attach();
 static void autopilot_attach(HMODULE eng);
 static void scroll_text_box(HMODULE eng);
 // inject.cpp: generated lines
-static int generated_line(int ch, int s1, int s2, int s3, int s4, std::string &perform);
+static int generated_line(int ch, int s1, int s2, int s3, int s4, const std::string &where, std::string &perform);
+// world.cpp: positions, following the guest
+static std::string world_json(JNIEnv *env);
+static void world_saw_walk(JNIEnv *env, int ch, jobject act);
+static void follow_tick(JNIEnv *env);
+static bool disguise_player(JNIEnv *env, float &x, float &z);
+static void java_log_init(JNIEnv *env);
 static void report_heard(const char *text);
 static bool understood_text(const char *text, std::string &out);
 static const char *redirect_wav(const char *name, std::string &keep);
@@ -366,7 +372,7 @@ JNI_FN(void, pushMultipleAnimationScripts, jint ch, jint s1, jint s2, jint s3, j
     logf("pushMultipleAnimationScripts ch=%d scripts=%d,%d,%d,%d layer=%d", ch, s1, s2, s3, s4, layer);
     std::string perform;
     if (layer == 7) {  // speech: let the line service write this line, if it's running
-        int g = generated_line(ch, s1, s2, s3, s4, perform);
+        int g = generated_line(ch, s1, s2, s3, s4, world_json(env), perform);
         if (g > 0) { s1 = g; s2 = s3 = s4 = -1; } else perform.clear();
     }
     CALL(void, pushMultipleAnimationScripts, 36, (JNIEnv *, jclass, jint, jint, jint, jint, jint, jint, jobject),
@@ -400,7 +406,9 @@ JNI_FN(void, doFullExpressionMoodAnimation, jint ch, jint expr, jint a, jint b, 
     logf("doFullExpressionMoodAnimation ch=%d expr=%d args=%d,%d", ch, expr, a, b);
     CALL(void, doFullExpressionMoodAnimation, 28, (JNIEnv *, jclass, jint, jint, jint, jint, jobject),
          env, cls, ch, expr, a, b, act);
-    perf_due(env, cls);  // (re-issued every ~0.5 s: the clock for timed gestures)
+    perf_due(env, cls);  // (re-issued every ~0.5 s: the clock for timed gestures and following)
+    java_log_init(env);
+    follow_tick(env);
 }
 JNI_FN(void, setGazeTracking, jint ch, jint target, jfloat x, jfloat y, jfloat z, jint a, jint b, jint c) {
     logf("setGazeTracking ch=%d target=%d at=(%.0f,%.0f,%.0f) args=%d,%d,%d", ch, target, x, y, z, a, b, c);
@@ -418,8 +426,48 @@ JNI_FN(void, miscLittleAction, jint ch, jint action, jint a, jfloat f) {
 // ---- movement and objects ----
 JNI_FN(void, walkStep, jint ch, jint a, jfloat x, jfloat y, jfloat z, jfloat f, jobject point, jobject act) {
     logf("walkStep ch=%d arg=%d to=(%.0f,%.0f,%.0f) f=%.2f", ch, a, x, y, z, f);
+    world_saw_walk(env, ch, act);
     CALL(void, walkStep, 40, (JNIEnv *, jclass, jint, jint, jfloat, jfloat, jfloat, jfloat, jobject, jobject),
          env, cls, ch, a, x, y, z, f, point, act);
+}
+JNI_FN(void, reactiveWalkStep, jint ch, jint a, jboolean b, jobject act) {
+    logf("reactiveWalkStep ch=%d arg=%d %d", ch, a, b);
+    world_saw_walk(env, ch, act);
+    CALL(void, reactiveWalkStep, 24, (JNIEnv *, jclass, jint, jint, jboolean, jobject), env, cls, ch, a, b, act);
+}
+// The guest's position as the drama manager reads it (see "the doorway" in world.cpp).
+JNI_FN(void, getObjectPosition, jint id, jobject p) {
+    CALL(void, getObjectPosition, 16, (JNIEnv *, jclass, jint, jobject), env, cls, id, p);
+    if (id != 2 || !p) return;
+    jclass c = env->GetObjectClass(p);
+    jfieldID fx = env->GetFieldID(c, "x", "F"), fz = env->GetFieldID(c, "z", "F");
+    float x = env->GetFloatField(p, fx), z = env->GetFloatField(p, fz);
+    if (disguise_player(env, x, z)) { env->SetFloatField(p, fx, x); env->SetFloatField(p, fz, z); }
+    env->DeleteLocalRef(c);
+}
+JNI_FN(void, getAllObjectPositions, jobject packet) {
+    CALL(void, getAllObjectPositions, 12, (JNIEnv *, jclass, jobject), env, cls, packet);
+    if (!packet) return;
+    jclass pc = env->GetObjectClass(packet);
+    jfieldID fi = env->GetFieldID(pc, "info", "[Lfacade/util/ObjectSensePacket$ObjectSenseInfo;");
+    jobjectArray info = fi ? (jobjectArray)env->GetObjectField(packet, fi) : NULL;
+    if (!info) { env->ExceptionClear(); env->DeleteLocalRef(pc); return; }
+    for (jsize i = 0, n = env->GetArrayLength(info); i < n; i++) {
+        jobject o = env->GetObjectArrayElement(info, i);
+        if (!o) continue;
+        jclass oc = env->GetObjectClass(o);
+        jfieldID fid = env->GetFieldID(oc, "objectID", "I"), fx = env->GetFieldID(oc, "x", "F"),
+                 fz = env->GetFieldID(oc, "z", "F");
+        if (env->GetIntField(o, fid) == 2) {
+            float x = env->GetFloatField(o, fx), z = env->GetFloatField(o, fz);
+            if (disguise_player(env, x, z)) { env->SetFloatField(o, fx, x); env->SetFloatField(o, fz, z); }
+            i = n;
+        }
+        env->DeleteLocalRef(oc);
+        env->DeleteLocalRef(o);
+    }
+    env->DeleteLocalRef(info);
+    env->DeleteLocalRef(pc);
 }
 JNI_FN(void, turnInPlace, jint ch, jfloat angle, jobject act) {
     logf("turnInPlace ch=%d angle=%.1f", ch, angle);
@@ -477,3 +525,4 @@ __declspec(dllexport) bool AblCallbackAPI_ScriptFinished(int ch, int script) {
 #include "autopilot.cpp"
 #include "inject.cpp"
 #include "perform.cpp"
+#include "world.cpp"

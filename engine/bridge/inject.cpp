@@ -91,12 +91,14 @@ static bool understood_text(const char *text, std::string &out) {
     return !out.empty() && out != text;
 }
 
-// Returns the script to push instead (one generated line), or -1 to push the original. `perform`
-// gets the line's performance (see perform.cpp).
-static int generated_line(int ch, int s1, int s2, int s3, int s4, std::string &perform) {
+// Returns the script to push instead (one generated line), or -1 to push the original. `where` is
+// everyone's position (world.cpp); `perform` gets the line's performance (see perform.cpp).
+static int generated_line(int ch, int s1, int s2, int s3, int s4, const std::string &where, std::string &perform) {
     if (ch < 0 || ch > 1 || s1 <= 0) return -1;
-    char body[128];
-    _snprintf(body, sizeof body, "{\"char\":%d,\"scripts\":[%d,%d,%d,%d]}", ch, s1, s2, s3, s4);
+    char head[128];
+    _snprintf(head, sizeof head, "{\"char\":%d,\"scripts\":[%d,%d,%d,%d],\"where\":", ch, s1, s2, s3, s4);
+    std::string body = head + where + "}";
+    logf("line service: asking %s", body.c_str());
     std::string reply;
     DWORD t0 = GetTickCount();
     if (!http_post(L"/line", body, reply, 6500)) return -1;  // service down or overloaded: originals

@@ -123,6 +123,54 @@ With each generated line, the line service also asks the LLM how it's performed
   manager's staging (where each character stands for each beat), and its walk behaviours would
   immediately walk them back. They need a hook into the staging, not just the calls above.
 
+## Off-script scenes and following (built 2026-10-28)
+
+Façade's drama manager has no room for a guest who takes the evening somewhere new. It deflects what
+it doesn't understand. It treats a guest in the hallway as leaving, and escalates to throwing them
+out. Nobody ever follows the guest.
+
+- **Scenes** (`engine/service/improv.py`). A scene starts in three ways:
+  - something the guest types takes the evening somewhere new (an LLM check, NEW or USUAL, with
+    examples and a USUAL default);
+  - the drama manager picks one of its off-script reactions (`DEFLECT*`, `*UNCOOP`, `*LEAVEAPARTMENT`,
+    `*LEAVEFORKITCHEN` beats);
+  - the guest walks into the hallway after coming in.
+
+  While a scene is on, Grace and Trip play it for real, and the story lines the drama manager wants
+  are held back. A scene always gets 2 held-back lines or 30 s. After that, an LLM judge, leaning
+  toward staying, decides per story line. The scene ends when:
+  - the guest's own words return to the evening;
+  - 6 story lines have been held back;
+  - the guest has been quiet for 50 s.
+
+  The first story line afterwards bridges from the scene and works in what was held back. While a
+  scene is on, the parser gets the guest's raw words, not a restatement. A restatement such as "I
+  should go." would make the drama manager act on it.
+- **Positions** (`engine/bridge/world.cpp`). Every line request carries everyone's floor position
+  (`getObjectPosition`). The service describes where the guest is: by the bar, in the hallway, next
+  to the speaker.
+- **Following.** Once the guest has come in (seen in the hallway, then well inside for 3 s), the
+  nearer host walks after them whenever they are more than 170 units from both hosts. The host
+  stops 70 units short. The same `walkStep` is re-issued every 0.5 s, as the drama manager does.
+  - Following only starts when that host's last walk from the drama manager has completed (its
+    `Walk` action's `completionStatus`).
+  - Replacing a walk the drama manager was still waiting on killed its Java process in testing.
+    There was no exception and no log; the process just exited.
+- **The doorway.** While the guest is in the hallway within 250 units of the door, the drama
+  manager's position reads (`getObjectPosition`, `getAllObjectPositions`) put them just inside the
+  doorway. Its "leaving the apartment" test never fires, so there's no warning, no escalation and no
+  eviction. Walking on toward the elevator shows the real position, so leaving still ends the evening.
+- **Typing.** The engine's typing filter (`+0xa19b0`) now accepts `*`, for actions. Subtitles are
+  capped at 140 characters, because longer ones overran the engine's buffer.
+- `FFR_NO_FOLLOW=1` and `FFR_NO_DISGUISE=1` turn the two bridge behaviours off. The drama manager's
+  console output goes to `%LOCALAPPDATA%\FacadeFanRemake\java.log`.
+- **Tested** with `engine/autopilot/improv_test.txt` on the hidden desktop, over five runs. In the
+  last run:
+  - scenes lasted 23-49 s, with 2-6 story lines held back;
+  - they returned with bridging lines;
+  - Grace followed the guest across the room;
+  - the drama manager ran to the end.
+
 ## GPU memory budget (12 GB card)
 
 Measured 2026-10-27 with `engine/service/measure_vram.py`, each piece alone:
@@ -158,8 +206,8 @@ runs also log frames slower than 100 ms. Neither showed a playback problem.
 ## Unknowns
 
 - How the in-memory script table is laid out, and whether adding a record at runtime is safe.
-- How to move a character (walk to the bar, sit on the couch) without the staging behaviours
-  walking them straight back.
+- Sitting down, and walks the LLM directs (to the bar, the window). Following works by walking only
+  when the drama manager's own walk is done; directed moves would need the same care.
 - Which discourse acts the original NLU emits (the Jess rule files in `util/sources/facade/nlu`).
 - The modern-Windows render stall in the menus (cursor in a black box, 0% CPU).
 
