@@ -146,6 +146,21 @@ static void engine_attach() {
          real_CreateFileA ? "on" : "MISSING");
     autopilot_attach(eng);  // only does anything in automated test runs
     inject_attach();
+
+    // Longer input: the text box cuts typing off where it reaches the box's right edge
+    // (animEngineDLL+0x9c9bf: "je keep_char" before the truncation). Make that jump unconditional,
+    // so typing continues up to the 255-character buffer the engine already has.
+    BYTE *jcc = (BYTE *)eng + 0x9c9bf;
+    if (jcc[0] == 0x74 && jcc[1] == 0x2e) {
+        DWORD old;
+        VirtualProtect(jcc, 1, PAGE_EXECUTE_READWRITE, &old);
+        jcc[0] = 0xEB;
+        VirtualProtect(jcc, 1, old, &old);
+        FlushInstructionCache(GetCurrentProcess(), jcc, 1);
+        logf("engine: text input no longer cut off at the box edge (up to 255 characters)");
+    } else {
+        logf("engine: unexpected bytes at the text-width check; input length unchanged");
+    }
 }
 
 // --- memory scan: where does the engine keep line 1055 (Trip, "Where are the new wine glasses?")?

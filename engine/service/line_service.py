@@ -70,9 +70,9 @@ class Lines:
         self.voices = Voices(self.catalog, mute=True)
         self.voices.load()
         self.voices.warm_thread()  # this thread; request threads warm themselves on first use
-        # Warm the LLM too: the first request otherwise pays ~15 s of setup mid-scene.
-        requests.post(LLM_URL, timeout=120, json={"messages": [{"role": "user", "content": "Say hi."}],
-                                                   "max_tokens": 4, "chat_template_kwargs": {"enable_thinking": False}})
+        # Warm the LLM with a real rewrite (same system prompt, so it's cached): the first line of
+        # the evening otherwise pays several seconds of setup mid-scene.
+        self.write_words("trip", self.by_id[("trip", 1055)], self.by_id[("trip", 1055)]["text"])
         INJECT.mkdir(parents=True, exist_ok=True)
         for f in INJECT.iterdir():
             f.unlink(missing_ok=True)
@@ -96,6 +96,19 @@ class Lines:
                 primary = (s, l)
         return primary, " ".join(parts).replace(" ,", ",")
 
+    def guest_since(self, char, line):
+        """What the guest has said since this character last spoke (their line should answer it),
+        unless they can't hear the guest (the argument behind the door, other offscreen lines)."""
+        if {"OFFSCREEN", "MUTED"} & set(line["direction"]) or line["beat"].startswith("PBEHINDDOOR"):
+            return []
+        since = []
+        for who, t in reversed(self.memory):
+            if who == char:
+                break
+            if who == "guest":
+                since.insert(0, t)
+        return since
+
     def write_words(self, char, line, original):
         name = self.player_name
         if name:
@@ -106,15 +119,7 @@ class Lines:
             name_rule = "You don't know the guest's name: never use a name for them."
         direction = " ".join(w.lower() for w in line["direction"]) or "natural"
         recent = "\n".join(f"{who.upper()}: {t}" for who, t in self.memory[-14:])
-        # What the guest has said since this character last spoke: the new line should answer it,
-        # unless they can't hear the guest (the argument behind the door, other offscreen lines).
-        since = []
-        offscreen = {"OFFSCREEN", "MUTED"} & set(line["direction"]) or line["beat"].startswith("PBEHINDDOOR")
-        for who, t in reversed(self.memory):
-            if who == char or offscreen:
-                break
-            if who == "guest":
-                since.insert(0, t)
+        since = self.guest_since(char, line)
         answer = (f"The guest just said: \"{' / '.join(since[-3:])}\". {char.capitalize()} hears it: respond to "
                   f"it naturally (acknowledge it, answer if it's a question) while still doing what the "
                   f"director's line does.\n") if since else ""
@@ -139,7 +144,7 @@ class Lines:
                 f"At most {max_words(original)} words. Write {char.capitalize()}'s line in your own words, "
                 f"not the director's."},
         ]
-        limit = max_words(original) + (8 if since else 0)  # room to acknowledge the guest
+        limit = max(max_words(original) + 8, 18) if since else max_words(original)  # room to answer
         plain = re.sub(r"\s*\{name\}\s*,?", " ", original)
         for attempt in range(3):
             r = requests.post(LLM_URL, timeout=20, json={
@@ -150,7 +155,8 @@ class Lines:
             text = r.json()["choices"][0]["message"]["content"].strip()
             text = re.sub(r'^\s*(grace|trip)\s*[:|]\s*', "", text, flags=re.I).strip().strip('"').strip()
             text = plain_ascii(text.splitlines()[0].strip()) if text else ""
-            fits = text and len(text.split()) <= limit and all(k.lower() in text.lower() for k in keys)
+            kept = sum(k.lower() in text.lower() for k in keys) if text else 0
+            fits = text and len(text.split()) <= limit and kept * 2 >= len(keys)  # at least half the details
             copied = text and same_words(text, plain, threshold=0.85)
             if fits and not copied:
                 return text
@@ -173,7 +179,13 @@ class Lines:
             return None
         self.voices.model.conds = cond
         wav = self.voices.model.generate(text).squeeze(0).cpu().numpy()
-        return soxr.resample(wav, self.voices.model.sr, OUT_SR), emotion
+        audio = soxr.resample(wav, self.voices.model.sr, OUT_SR)
+        # Sound like the take it replaces: through the door, down the hall, in the room.
+        orig = line.get("audio")
+        offscreen = bool({"OFFSCREEN", "MUTED"} & directions) or line["beat"].startswith("PBEHINDDOOR")
+        if orig:
+            audio = match_take(audio, FACADE / orig, offscreen)
+        return audio, emotion
 
     def record(self, char, script, text, audio_s):
         """The original record with its speech block replaced: new phonemes, cues retimed, new text."""
@@ -188,7 +200,8 @@ class Lines:
         speech = [perf.base_frame, 0, 1, ff.PHONEME_START] + text_to_codes(text) + [0]
         for t, cue in perf.cues[:-1]:
             speech += [max(1, int(t * ratio)), cue]
-        speech += [max(200, int(orig_end * ratio)), 0, -1, script]
+        # The script ends at its last cue time; end just after our audio so no words get clipped.
+        speech += [int(audio_s * 1000) + 150, 0, -1, script]
         speech += [ord(c) for c in text.encode("latin-1", "replace").decode("latin-1")] + [-1]
         return rec[:b + 1] + speech + rec[e:]
 
@@ -201,7 +214,9 @@ class Lines:
         if not primary:
             return {"replace": False}
         script, line = primary
-        if len(re.findall(r"[A-Za-z']+", original.replace("{name}", ""))) < MIN_WORDS_TO_REWRITE:
+        short = len(re.findall(r"[A-Za-z']+", original.replace("{name}", ""))) < MIN_WORDS_TO_REWRITE
+        if short and not self.guest_since(char, line):
+            # A short reaction with nothing to answer: the actor's own "uh..." is better.
             self.memory.append((char, original.replace("{name}", self.player_name or "")))
             return {"replace": False, "why": "short reaction"}
         with self.lock:   # one line at a time: the voice model isn't re-entrant
@@ -307,6 +322,45 @@ def plain_ascii(text):
                  ("”", '"'), ("…", "...")):
         text = text.replace(a, b)
     return re.sub(r"\s+", " ", text.encode("ascii", "ignore").decode()).strip()
+
+
+def match_take(audio, orig_path, offscreen):
+    """Make a generated line sit where the original take sat: match its average tone (a smoothed EQ
+    curve from the two spectra, so a muffled through-the-door take muffles ours) and its loudness.
+    Offscreen lines also get a short room reverb."""
+    import librosa
+    try:
+        ref, sr = librosa.load(str(orig_path), sr=OUT_SR, mono=True)
+    except Exception:
+        return audio
+    if len(ref) < OUT_SR // 4 or len(audio) < OUT_SR // 4:
+        return audio
+    n_fft, hop = 1024, 256
+
+    def active_spectrum(x):
+        S = np.abs(librosa.stft(x, n_fft=n_fft, hop_length=hop))
+        e = S.sum(axis=0)
+        keep = e > e.max() * 0.05  # skip silences
+        return S[:, keep].mean(axis=1) + 1e-6
+
+    gain_db = 20 * np.log10(active_spectrum(ref) / active_spectrum(audio))
+    # Smooth across frequency (~1/3 octave) and limit, so we copy the tone, not the words.
+    k = np.maximum(1, (np.arange(len(gain_db)) * 0.12).astype(int))
+    smooth = np.array([gain_db[max(0, i - k[i]):i + k[i] + 1].mean() for i in range(len(gain_db))])
+    smooth = np.clip(smooth - np.median(smooth), -30, 12)
+    S = librosa.stft(audio, n_fft=n_fft, hop_length=hop)
+    out = librosa.istft(S * (10 ** (smooth / 20))[:, None], hop_length=hop, length=len(audio))
+    if offscreen:  # a little room: exponentially decaying noise burst, ~0.35 s
+        n = int(0.35 * OUT_SR)
+        ir = np.random.default_rng(0).standard_normal(n) * np.exp(-np.arange(n) / (0.08 * OUT_SR))
+        wet = np.convolve(out, ir / np.abs(ir).sum())[: len(out)]
+        out = 0.75 * out + 0.6 * wet
+    def loud(x):  # RMS of the voiced parts
+        frames = librosa.feature.rms(y=x, frame_length=1024, hop_length=256)[0]
+        return np.sqrt(np.mean(frames[frames > frames.max() * 0.1] ** 2)) + 1e-9
+    out *= loud(ref) / loud(out)
+    peak = np.abs(out).max()
+    return out * (0.98 / peak) if peak > 0.98 else out
 
 
 def _wav_seconds(path):
