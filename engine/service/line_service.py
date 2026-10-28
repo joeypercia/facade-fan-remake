@@ -69,9 +69,16 @@ class Lines:
         self.perf = {c: ff.read_sbinary(FACADE, c) for c in CHARS.values()}
         self.memory = []      # tonight: ("guest"|"grace"|"trip", text)
         self.player_name = None
-        self.scene = None     # an off-script scene in progress (improv.Scene)
+        self.scene = None     # an off-script scene in progress (improv.Scene): the story is paused
+        self.ending = None    # the scene that just ended: the next story line bridges from it
         self.came_in = False  # the guest has been inside the apartment
+        self.where = {}       # everyone's position, as of the last request
+        self.ended_at = 0.0   # when the last scene ended
+        self.hall_done = False  # this trip out to the hallway has had its scene
         self.lines_kind = "story"
+        # Scene lines need a record to ride on: an ordinary onscreen line per character (its slot is
+        # only borrowed while the story is paused, so the drama manager can't want it meanwhile).
+        self.template = {c: self.pick_template(c) for c in CHARS.values()}
         self.lock = threading.Lock()
         from voice import Voices
         self.voices = Voices(self.catalog, mute=True)
@@ -83,6 +90,19 @@ class Lines:
         INJECT.mkdir(parents=True, exist_ok=True)
         for f in INJECT.iterdir():
             f.unlink(missing_ok=True)
+
+    def pick_template(self, char):
+        fallback = None
+        for l in self.catalog.lines:
+            s = l["script_index"]
+            if (l["character"] != char or not l.get("audio") or {"OFFSCREEN", "MUTED"} & set(l["direction"]) or
+                    l["beat"].startswith("PBEHINDDOOR") or l["beat"] in NAME_BEATS or l["beat"].islower() or
+                    not (self.perf[char].get(s) and self.perf[char][s].text) or len(l["text"].split()) < 8):
+                continue
+            if "DEFLECT" in l["beat"]:
+                return l
+            fallback = fallback or l
+        return fallback
 
     # ---- the brief: what the drama manager wants said ----
     def brief(self, char, scripts):
@@ -119,26 +139,7 @@ class Lines:
     def write_words(self, char, line, original, where=None):
         where = where or {}
         place = improv.describe(where, char)
-        if improv.inside(where):
-            self.came_in = True
-        # (the guest starts out in the hallway: only once they've been in does going out mean anything)
-        moment, outside = improv.moment(line["beat"]), self.came_in and improv.outside(where)
-        recent = "\n".join(f"{who.upper()}: {t}" for who, t in self.memory[-14:])
-        if self.scene is None and (moment or outside):
-            heard = self.guest_since(char, line)
-            what = moment or "the guest has walked out into the hallway, outside the apartment"
-            self.scene = improv.Scene(what + (f" (the guest: \"{' / '.join(heard[-2:])}\")" if heard else ""))
-            log(f"    scene starts: {self.scene.what}")
-        bridge = None
-        if self.scene:
-            plain = re.sub(r"\s*\{name\}\s*,?", " ", original).strip()
-            if moment or outside or (not self.scene.must_end() and self.scene.still_alive(char, plain, recent)):
-                if not moment:   # a story line held back
-                    self.scene.skipped.append(f"{char.upper()}: {plain}")
-                self.lines_kind = "scene"
-                return self.improvise(char, line, self.scene.what, place)
-            bridge, self.scene = self.scene, None
-            log(f"    scene ends after {time.time() - bridge.started:.0f}s, {len(bridge.skipped)} story line(s) held back")
+        bridge, self.ending = self.ending, None
         self.lines_kind = "return" if bridge else "story"
         name = self.player_name
         if name:
@@ -155,9 +156,8 @@ class Lines:
                   f"director's line does.\n") if since else ""
         if bridge:
             answer += (f"The conversation had wandered off to something else ({bridge.what}) and is now coming "
-                       f"back: bridge naturally from it rather than ignoring it.\n" +
-                       (f"While it wandered, these went unsaid; work in any that still matter:\n" +
-                        "\n".join(bridge.skipped[-4:]) + "\n" if bridge.skipped else ""))
+                       f"back to the evening: open with a few words that close that off naturally, then say "
+                       f"the director's line.\n")
         prompt = [
             {"role": "system", "content": "\n\n".join([
                 SETTING, CHARACTERS["grace"], CHARACTERS["trip"],
@@ -209,32 +209,44 @@ class Lines:
                            f"{', '.join(keys) or 'the same things'}. Only the line."})
         return ""  # couldn't get a faithful line: the original plays
 
-    def improvise(self, char, line, off_script, place):
-        """A line inside an off-script scene (improv.Scene): keep the new situation going."""
+    def improvise(self, char, scene, guest_words):
+        """A line inside an off-script scene (improv.Scene): answer the guest, keep it going."""
         name_rule = (f"The guest is called {self.player_name}." if self.player_name else
                      "You don't know the guest's name: never use a name for them.")
         recent = "\n".join(f"{who.upper()}: {t}" for who, t in self.memory[-14:])
-        since = self.guest_since(char, line)
-        direction = " ".join(w.lower() for w in line["direction"]) or "natural"
+        other = "trip" if char == "grace" else "grace"
+        place = improv.describe(self.where, char)
+        if guest_words:
+            task = (f"The guest just said or did: \"{' / '.join(guest_words[-3:])}\". {char.capitalize()} answers "
+                    f"that directly: if it's a question or a request to {char.capitalize()}, answer it or do it "
+                    f"(or refuse, in character).")
+        else:
+            task = (f"The guest has gone quiet. {char.capitalize()} keeps the moment going: a question to the "
+                    f"guest, a reaction to what was just said, or a remark to {other.capitalize()}.")
         prompt = [
             {"role": "system", "content": "\n\n".join([
                 SETTING, CHARACTERS["grace"], CHARACTERS["trip"], name_rule,
-                "You write one line of dialogue at a time for an improvised stage play. The guest has taken "
-                "the evening somewhere new. Stay in character and play the new situation for real, the way "
-                "these two people would: answer, react, joke, argue, follow them, build on what they said or "
-                "did, add something of your own. Don't steer back to earlier topics; let the scene develop. "
-                "Grace and Trip's own tensions can still show. Words in *asterisks* or (parentheses) are "
-                "things the guest physically does. Never mention a script, a play or a director.",
+                f"You write {char.capitalize()}'s next line in an improvised scene. The guest has taken the "
+                "evening somewhere new and the hosts go along with it for real, the way these two people "
+                "would: answer, react, joke, play along, build on what was said or done. They are glad to "
+                "see their old friend and want the evening to go well, so they're warm with the guest, even "
+                "teasing; any sharpness goes at each other, and Grace and Trip's own tensions can still show. "
+                "Don't steer back to earlier topics. Say plain, concrete things about what's happening right "
+                "now; no cryptic metaphors, and don't keep coming back to the same joke.",
+                "Stay consistent with the conversation and with where everyone physically is: never say you "
+                "are somewhere you aren't, never invent facts about the guest, and don't speak for "
+                f"{other.capitalize()} or the guest. Words in "
+                "*asterisks* or (parentheses) are things the guest physically does. Never mention a script, a "
+                "play or a director.",
                 "Natural spoken English; no stage directions, no quotation marks, no speaker name. At most "
-                "28 words. Output only the line.",
+                "25 words. Output only the line.",
             ])},
             {"role": "user", "content":
                 (f"Tonight so far:\n{recent}\n\n" if recent else "") +
-                f"The new situation: {off_script}." + (f" {place}" if place else "") + "\n" +
-                (f"The guest just said or did: \"{' / '.join(since[-3:])}\"\n" if since else "") +
-                f"{char.upper()} speaks next ({direction})."},
+                f"What's going on: {scene.what}.\n" + (f"{place}\n" if place else "") + task +
+                f"\nWrite {char.upper()}'s line."},
         ]
-        for _ in range(2):
+        for _ in range(3):
             r = requests.post(LLM_URL, timeout=4, json={
                 "messages": prompt, "temperature": 0.8, "top_p": 0.9, "max_tokens": 70,
                 "chat_template_kwargs": {"enable_thinking": False},
@@ -247,8 +259,17 @@ class Lines:
             repeat = any(same_words(text, t, threshold=0.8) for _, t in self.memory[-10:]) if text else False
             narration = bool(re.match(r"^(\w+ )?(clears|sighs|laughs|looks|nods|smiles|shrugs|pauses|turns)\b",
                                       text, re.I))
-            if text and len(text.split()) <= 32 and not repeat and not narration:
+            # the model talking about the task ("Sure, here's Trip's line...") instead of doing it
+            meta = bool(re.search(r"\b(here's|here is) (\w+'s )?(line|response)|\bin character\b|\b(scene|script)\b",
+                                  text, re.I)) or text.lower().startswith(("sure,", "sure!", "certainly"))
+            if text and len(text.split()) <= 32 and not repeat and not narration and not meta:
                 return text
+            if meta or not text:   # start over rather than argue with it (empty: it wrote only an *action*)
+                prompt = prompt[:2] + ([] if meta else [
+                    {"role": "assistant", "content": r.json()["choices"][0]["message"]["content"].strip()},
+                    {"role": "user", "content": f"Only the words {char.capitalize()} says out loud; no actions. "
+                                                f"If {char.capitalize()} does something, say it in the words."}])
+                continue
             prompt += [{"role": "assistant", "content": text},
                        {"role": "user", "content": "That repeats something already said; say something new." if repeat
                         else "Shorter: at most 28 words. Only the line."}]
@@ -299,6 +320,12 @@ class Lines:
         if not primary:
             return {"replace": False}
         script, line = primary
+        if where:
+            self.where = where
+            if improv.inside(where):
+                self.came_in = True
+        if self.pause_story(char, line):
+            return {"replace": False, "hold": True}
         short = len(re.findall(r"[A-Za-z']+", original.replace("{name}", ""))) < MIN_WORDS_TO_REWRITE
         if short and not self.guest_since(char, line) and not improv.moment(line["beat"]) and not self.scene:
             # A short reaction with nothing to answer: the actor's own "uh..." is better.
@@ -329,6 +356,15 @@ class Lines:
             # would leave a stale line queued for the next time this script comes up.
             log(f"{char} #{script} too slow ({time.perf_counter() - t0:.1f}s): dropped")
             return {"replace": False, "why": "too slow"}
+        out = self.emit(char, script, text, audio, pick)
+        log(f"{char} #{script} {line['beat']} {self.lines_kind.upper()} [{emotion}] "
+            f"{time.perf_counter() - t0:.2f}s (words {t1 - t0:.2f}s, "
+            f"acting {t2 - t1:.2f}s)\n"
+            f"    was: {original}\n    now: {text}\n    acting: {pick or 'none chosen'}")
+        return out
+
+    def emit(self, char, script, text, audio, pick):
+        """Queue a generated line for the engine (see the module docstring) and remember it."""
         file_no = self.perf[char][script].base_frame + 1
         wav_path = INJECT / f"{char}_{file_no}_{uuid.uuid4().hex[:8]}.wav"
         _write_wav(wav_path, audio)
@@ -339,37 +375,122 @@ class Lines:
         os.replace(stem.with_suffix(".job.tmp"), stem.with_suffix(".job"))  # the job file appears last
         self.memory.append((char, text))
         perform = performance.spec(char, dict(pick), text, len(audio) / OUT_SR)
-        log(f"{char} #{script} {line['beat']} {self.lines_kind.upper()} [{emotion}] "
-            f"{time.perf_counter() - t0:.2f}s (words {t1 - t0:.2f}s, "
-            f"acting {t2 - t1:.2f}s)\n"
-            f"    was: {original}\n    now: {text}\n    acting: {pick or 'none chosen'}")
-        return {"replace": True, "script": script, "file": file_no, "text": text, "perform": perform}
+        return {"replace": True, "script": script, "file": file_no, "text": text, "perform": perform,
+                "ms": int(len(audio) / OUT_SR * 1000)}
+
+    # ---- scenes: the story paused while the guest takes the evening somewhere new ----
+    def pause_story(self, char, line):
+        """Should this story line wait (the bridge holds it) while a scene plays? Starts a scene when
+        the drama manager reaches for a stock off-script reaction or the guest is out in the hallway."""
+        if not self.came_in:   # the guest starts out in the hallway; the greeting is the drama manager's
+            return False
+        if not improv.outside(self.where):
+            self.hall_done = False
+        if self.scene is None:
+            what = improv.moment(line["beat"])
+            if what and time.time() - self.ended_at > 15:
+                self.scene = improv.Scene(what, "moment")
+            elif improv.outside(self.where) and not self.hall_done:
+                self.hall_done = True   # one hallway scene per trip out there
+                self.scene = improv.Scene("the guest has walked out of the apartment into the hallway", "outside")
+            else:
+                return False
+            for t in self.guest_since(char, line)[-2:]:
+                self.scene.heard(t)
+            log(f"    scene starts: {self.scene.what}")
+        log(f"    story paused at {char} #{line['script_index']} {line['beat']}")
+        return True
+
+    def nearer_host(self):
+        p = self.where.get("player")
+        if not p or not self.where.get("grace") or not self.where.get("trip"):
+            return "trip"
+        return min(("grace", "trip"), key=lambda c: improv._d(p, self.where[c]))
+
+    def end_scene(self, why):
+        s, self.scene = self.scene, None
+        self.ending, self.ended_at = s, time.time()
+        log(f"    scene ends ({why}) after {time.time() - s.started:.0f}s, {len(s.speakers)} line(s); story resumes")
+        return {"end": True}
+
+    def scene_step(self, where, free=(0, 1)):
+        """The bridge holds the story and asks what happens next: a scene line, wait, or end.
+        `free`: the characters not in the middle of a line (only they can be given one)."""
+        s = self.scene
+        if s is None:
+            return {"end": True}
+        if where:
+            self.where = where
+        free = {CHARS[c] for c in free if c in CHARS}
+        if not free:
+            return {"wait": True}
+        now = time.time()
+        if s.why == "outside" and improv.inside(self.where) and not s.inbox:
+            return self.end_scene("the guest came back in")
+        if s.guest_back and not s.inbox:
+            return self.end_scene("the guest is back on the evening")
+        if now - s.started > improv.MAX_S:
+            return self.end_scene("time")
+        words = list(s.inbox)
+        if words:
+            last = s.speakers[-1] if s.speakers else None
+            char = improv.addressed(words[-1]) or last or self.nearer_host()
+            if char not in free:
+                char = next(iter(free))
+            s.inbox.clear()
+        elif now - max(s.last_guest, s.last_line) > improv.QUIET_S:
+            return self.end_scene("it went quiet")
+        elif now - s.last_line > improv.CHIME_S and now - s.last_guest > improv.CHIME_S and s.chimes < improv.MAX_CHIMES:
+            last = s.speakers[-1] if s.speakers else "trip"
+            char = "grace" if last == "trip" else "trip"
+            if char not in free:
+                char = next(iter(free))
+            s.chimes += 1
+        else:
+            return {"wait": True}
+        t0 = time.perf_counter()
+        template = self.template[char]
+        with self.lock:
+            text = fit_subtitle(self.improvise(char, s, words))
+            if not text:
+                return {"wait": True}
+            pick = performance.choose(char, text, "natural",
+                                      "\n".join(f"{w.upper()}: {t}" for w, t in self.memory[-4:]), timeout=1.0)
+            audio, emotion = self.voice(char, template, text)
+            out = self.emit(char, template["script_index"], text, audio, pick)
+        s.spoke(char)
+        out.update(say=True, char=next(k for k, v in CHARS.items() if v == char))
+        log(f"{char} SCENE [{emotion}] {time.perf_counter() - t0:.2f}s\n    now: {text}\n    acting: {pick or 'none chosen'}")
+        return out
 
     def heard(self, text):
         text = text.strip()
         if text and text != "warm up nlu":
             self.memory.append(("guest", text))
-            if self.scene:
-                self.scene.last_guest = time.time()
             log(f"guest: {text}")
 
     def understand(self, text):
         """Restate what the player typed in the plain phrasing Façade's 2005 parser recognizes, so the
-        original drama manager picks the right reaction. The real words go to tonight's memory."""
+        original drama manager picks the right reaction. The real words go to tonight's memory.
+        Returns (text for the drama manager, hide): during a scene the scene answers instead, and the
+        drama manager (paused) hears nothing."""
         text = text.strip()
         if not text or text in (" ", "warm up nlu"):
-            return text
+            return text, False
         self.heard(text)
         recent = "\n".join(f"{who.upper()}: {t}" for who, t in self.memory[-6:-1])
-        if improv.takes_it_somewhere_new(text, recent, self.scene):
-            if self.scene is None:
-                self.scene = improv.Scene(f"the guest's \"{text}\"")
-                log(f"    scene starts: {self.scene.what}")
-            # Don't translate it into one of the parser's stock acts ("I should go."): the drama manager
-            # would act on that. Its own reading of the raw words is usually a harmless deflection.
+        if self.came_in and improv.takes_it_somewhere_new(text, recent, self.scene):
+            if self.scene:
+                self.scene.heard(text)
+                return "", True
+            self.scene = improv.Scene(f"the guest's \"{text}\"")
+            self.scene.heard(text)
+            log(f"    scene starts: {self.scene.what}")
+            # The story pauses at the drama manager's next line. Until then it hears the raw words, not
+            # one of the parser's stock acts ("I should go."), which it would act on.
             plain = re.sub(r"[*()]", " ", text).strip()
             log(f"    parser hears (as typed): {plain}")
-            return plain
+            return plain, False
         if self.scene:
             self.scene.guest_back = True   # the guest turned back to the evening: the story picks up
             log("    guest is back on the evening; the scene will close")
@@ -385,9 +506,9 @@ class Lines:
         out = plain_ascii(r.json()["choices"][0]["message"]["content"].strip().splitlines()[0]).strip('"')
         out = re.sub(r"^(the guest (typed|said|says)|guest|restated)\s*[:,]\s*", "", out, flags=re.I).strip().strip('"')
         if not out or len(out) > 160:
-            return text
+            return text, False
         log(f"    parser hears: {out}")
-        return out
+        return out, False
 
 
 UNDERSTAND_PROMPT = """You help a 2005 keyword-based text parser understand a player in the interactive drama Façade.
@@ -515,9 +636,9 @@ def worker():
     import queue as _q
     LINES.voices.warm_thread()
     while True:
-        args, reply = JOBS.get()
+        fn, args, reply = JOBS.get()
         try:
-            reply.put(LINES.line(*args))
+            reply.put(fn(*args))
         except Exception as e:
             log(f"error: {e!r}")
             reply.put({"replace": False, "why": repr(e)})
@@ -530,14 +651,19 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.path == "/line":
                 reply = _q.Queue()
-                JOBS.put(((int(body.get("char", -1)), [int(s) for s in body.get("scripts", [])],
-                           body.get("where") or {}), reply))
+                JOBS.put((LINES.line, (int(body.get("char", -1)), [int(s) for s in body.get("scripts", [])],
+                                       body.get("where") or {}), reply))
+                out = reply.get()
+            elif self.path == "/scene":
+                reply = _q.Queue()
+                JOBS.put((LINES.scene_step, (body.get("where") or {}, body.get("free", [0, 1])), reply))
                 out = reply.get()
             elif self.path == "/heard":
                 LINES.heard(body.get("text", ""))
                 out = {"ok": True}
             elif self.path == "/understand":
-                out = {"text": LINES.understand(body.get("text", ""))}
+                text, hide = LINES.understand(body.get("text", ""))
+                out = {"text": text, "hide": hide}
             else:
                 self.send_error(404)
                 return

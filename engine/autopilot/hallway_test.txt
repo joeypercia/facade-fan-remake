@@ -1,0 +1,26 @@
+# Paused-story test: in through the door, start something off script (ghosts) and keep it going,
+# turn back to the evening (wine), then walk out to the hallway and ask Trip to come talk privately,
+# then come back in. Checks: the story waits during scenes (bridge "scene: the story is paused" /
+# "story resumes"), the door stays open with the guest outside, someone follows, Java survives.
+0 shots 3
+@tr_intro_end+32 key J 0.2
+@tr_intro_end+36 key RETURN 0.2
+@tr_intro_end+50 key UP 1.5
+@tr_intro_end+100 key UP 2.5
+@tr_intro_end+110 say hi guys!
+@tr_intro_end+125 say do you guys believe in ghosts? I think this building is haunted
+@tr_intro_end+145 say *knocks on the wall three times* did you hear that?
+@tr_intro_end+165 say I'm serious. Grace, what was that noise?
+@tr_intro_end+185 say haha ok maybe it was the pipes
+@tr_intro_end+205 say anyway, I'd love a glass of wine
+@tr_intro_end+235 key DOWN 4
+@tr_intro_end+240 key DOWN 4
+@tr_intro_end+245 key DOWN 4
+@tr_intro_end+250 key DOWN 4
+@tr_intro_end+260 say trip, come out here for a sec, I need to talk to you privately
+@tr_intro_end+285 say (whispers) is everything ok with you two?
+@tr_intro_end+310 say ok, let's go back inside
+@tr_intro_end+320 key UP 4
+@tr_intro_end+325 key UP 4
+@tr_intro_end+330 key UP 4
+@tr_intro_end+345 say your apartment looks great

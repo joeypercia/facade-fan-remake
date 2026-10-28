@@ -2,29 +2,31 @@
 
 The drama manager has stock reactions for a guest who goes off script: deflections when it didn't
 follow what they said, "uncooperative" lines when they go quiet or act strangely, and warnings when
-they head for the door or the kitchen. Any of those (or the guest walking out into the hallway)
-starts a scene: the LLM plays the new situation for real instead of the stock line.
+they head for the door or the kitchen. Any of those, the guest taking the evening somewhere new
+(a classifier on their words), or the guest walking out into the hallway starts a scene.
 
-While a scene is on, the story lines the drama manager wants are held back (remembered) and the
-scene continues. A new scene always gets room (MIN_SKIPPED lines or MIN_S seconds); after that each
-story line is put to the LLM: is the scene still going anywhere? Coming back, the story line is
-spoken, bridged from the scene, with what was held back worked in. The story comes back when the
-guest's own words turn back to the evening, after MAX_SKIPPED held-back lines, or when the guest
-has stopped feeding the scene for QUIET_S seconds.
+A scene pauses the story. The next story line the drama manager pushes is held: the bridge keeps
+that character's thread waiting inside the push (and the other character's too, at their next
+line), so the drama manager can't move on to the next beat while the scene plays. Meanwhile the
+bridge asks the service for scene lines (/scene): Grace and Trip answer whatever the guest says or
+does, and chime in on their own when the guest goes quiet. The scene ends when the guest's own
+words turn back to the evening, when it fizzles out (nobody has added anything for QUIET_S), or
+after MAX_S; then the held story line plays, bridged from the scene.
 
-Positions come from the bridge with each line request (world.cpp): floor x, z in the engine's units.
+Positions come from the bridge with each request (world.cpp): floor x, z in the engine's units.
 """
 import math
+import re
 import time
 
 import requests
 
 from config import LLM_URL
 
-MIN_SKIPPED = 2   # a new scene always gets this many held-back story lines...
-MIN_S = 30        # ...or this long, before the LLM is asked whether it's run its course
-MAX_SKIPPED = 6
-QUIET_S = 50
+QUIET_S = 20      # nobody (guest or hosts) has added anything for this long: the scene is over
+CHIME_S = 12      # the guest has been quiet this long: a host keeps the scene going...
+MAX_CHIMES = 1    # ...at most this many times in a row
+MAX_S = 240
 
 # beat-name ending -> what is happening (the beat names are the catalog's, e.g. T1L2LEAVEAPARTMENT)
 MOMENTS = [
@@ -44,50 +46,39 @@ PLACES = {"bar": "the bar", "couch": "the couch", "window": "the big window", "w
 
 
 class Scene:
-    def __init__(self, what):
+    def __init__(self, what, why="words"):
         self.what = what
-        self.started = self.last_guest = time.time()
-        self.skipped = []         # "TRIP: <story line>" held back while the scene went on
+        self.why = why            # "words" (the guest's), "moment" (a stock reaction), "outside"
+        self.started = self.last_guest = self.last_line = time.time()
+        self.inbox = []           # the guest's words not answered yet
+        self.chimes = 0           # host lines in a row with no guest input
+        self.speakers = []        # who has spoken in the scene
         self.guest_back = False   # the guest's own words turned back to the evening
 
-    def must_end(self):
-        return (self.guest_back or len(self.skipped) >= MAX_SKIPPED or
-                time.time() - self.last_guest > QUIET_S)
+    def heard(self, text):
+        self.inbox.append(text)
+        self.last_guest = time.time()
+        self.chimes = 0
 
-    def still_alive(self, char, story_line, recent):
-        """Stay in the scene for this story line? A new scene always gets room to develop (MIN_SKIPPED
-        held-back lines or MIN_S seconds); after that the LLM judges, leaning toward staying."""
-        if len(self.skipped) < MIN_SKIPPED and time.time() - self.started < MIN_S:
-            return True
-        try:
-            r = requests.post(LLM_URL, timeout=1.5, json={
-                "messages": [
-                    {"role": "system", "content":
-                        "You judge the flow of an improvised evening. The guest took the conversation "
-                        "somewhere new, and the hosts are going along with it. Let it develop: answer STAY "
-                        "while it is still going anywhere (the guest is into it, it's mid-exchange, a joke "
-                        "or argument is building). Answer RETURN only if it has clearly run dry, so the "
-                        "hosts' planned next line would come naturally now. Answer with one word: STAY or "
-                        "RETURN."},
-                    {"role": "user", "content":
-                        f"Conversation:\n{recent}\n\nThe new situation: {self.what}\n"
-                        f"Planned next line, {char.upper()}: \"{story_line}\"\nSTAY or RETURN?"},
-                ],
-                "temperature": 0.0, "max_tokens": 4, "chat_template_kwargs": {"enable_thinking": False},
-            })
-            r.raise_for_status()
-            return "RETURN" not in r.json()["choices"][0]["message"]["content"].upper()
-        except (requests.RequestException, ValueError, KeyError, IndexError):
-            return False
+    def spoke(self, char):
+        self.speakers.append(char)
+        self.last_line = time.time()
 
 
 def takes_it_somewhere_new(text, recent, scene=None):
     """Is the guest taking the evening somewhere new (or carrying on with the scene in progress)?"""
-    ask = (f"The conversation has gone somewhere new: {scene.what}\n"
-           "Is the guest still on that (NEW), or back on the evening's usual business (USUAL)?") if scene else (
-        "Is the guest taking the evening somewhere new (NEW), or is this ordinary visit business (USUAL)?")
+    if scene:
+        ask = (f"The conversation has gone somewhere new: {scene.what}\nIs the guest still in that (NEW), or "
+               "changing the subject back to the visit itself (USUAL)? Replies, answers, laughter, jokes, "
+               "and questions about what was just said count as NEW. Moving on to drinks, praising or asking "
+               "about the apartment or its things, going back inside, or \"anyway...\" counts as USUAL.\n"
+               "Examples: \"haha yeah\" NEW. \"wait, really?\" NEW. \"anyway, I'd love a glass of wine\" USUAL. "
+               "\"your apartment looks great\" USUAL. \"ok, let's go back inside\" USUAL. \"ok, enough of "
+               "that\" USUAL.")
+    else:
+        ask = "Is the guest taking the evening somewhere new (NEW), or is this ordinary visit business (USUAL)?"
     try:
-        r = requests.post(LLM_URL, timeout=1.0, json={
+        r = requests.post(LLM_URL, timeout=2.0, json={
             "messages": [
                 {"role": "system", "content":
                     "You judge what a guest visiting old friends Grace and Trip is doing. Words in *asterisks* "
@@ -96,19 +87,21 @@ def takes_it_somewhere_new(text, recent, scene=None):
                     "apartment and its things, questions about Grace and Trip, their marriage or their jobs, "
                     "agreeing, disagreeing, taking sides, hugging, saying goodbye.\n"
                     "NEW: a topic, game, story or activity of the guest's own that has nothing to do with the "
-                    "visit (ghosts, juggling, a seance, a dance-off), odd physical actions, inviting them "
-                    "somewhere else.\n"
+                    "visit (ghosts, juggling, a seance, a dance-off), odd physical actions, asking one of them to "
+                    "step out or talk somewhere else, inviting them somewhere else.\n"
                     "Examples: \"hi guys!\" USUAL. \"your place looks great\" USUAL. \"are you two okay?\" "
                     "USUAL. \"I'll have a beer\" USUAL. \"*juggles oranges*\" NEW. \"let's play hide and "
-                    "seek\" NEW. \"I think this building is haunted\" NEW. When unsure: USUAL."},
+                    "seek\" NEW. \"I think this building is haunted\" NEW. \"trip, come out to the hallway "
+                    "for a sec\" NEW. When unsure: " + ("NEW." if scene else "USUAL.")},
                 {"role": "user", "content": f"Conversation:\n{recent}\n\nThe guest now: \"{text}\"\n{ask}"},
             ],
             "temperature": 0.0, "max_tokens": 4, "chat_template_kwargs": {"enable_thinking": False},
         })
         r.raise_for_status()
-        return "NEW" in r.json()["choices"][0]["message"]["content"].upper()
+        out = r.json()["choices"][0]["message"]["content"].upper()
+        return "NEW" in out if not scene else "USUAL" not in out
     except (requests.RequestException, ValueError, KeyError, IndexError):
-        return False
+        return bool(scene)
 
 
 def moment(beat):
@@ -119,44 +112,62 @@ def moment(beat):
     return None
 
 
+def addressed(text):
+    """The host the guest's words are aimed at, if they name one."""
+    t = text.lower()
+    g, tr = re.search(r"\bgrace\b", t), re.search(r"\btrip\b", t)
+    if g and not tr:
+        return "grace"
+    if tr and not g:
+        return "trip"
+    return None
+
+
 def _d(a, b):
     return math.hypot(a[0] - b[0], a[1] - b[1])
 
 
-def _past_door(where):
-    """How far the guest is past the front door toward the living room (negative: out in the hallway)."""
-    p, door, couch = where.get("player"), where.get("door"), where.get("couch")
+def past_door(where, who="player"):
+    """How far someone is past the front door toward the living room (negative: out in the hallway)."""
+    p, door, couch = where.get(who), where.get("door"), where.get("couch")
     if not (p and door and couch):
         return None
     inward = (couch[0] - door[0], couch[1] - door[1])
     return ((p[0] - door[0]) * inward[0] + (p[1] - door[1]) * inward[1]) / (math.hypot(*inward) or 1)
 
 
-def outside(where):
-    """The guest is out in the hallway (more than 20 units past the door)."""
-    d = _past_door(where)
+def outside(where, who="player"):
+    """Out in the hallway (more than 20 units past the door)."""
+    d = past_door(where, who)
     return d is not None and d < -20
 
 
-def inside(where):
-    """The guest is well into the apartment (same test as the bridge's following)."""
-    d = _past_door(where)
+def inside(where, who="player"):
+    """Well into the apartment (same test as the bridge's following)."""
+    d = past_door(where, who)
     return d is not None and d > 100
 
 
+def _place(where, who):
+    if outside(where, who):
+        return "out in the hallway, outside the apartment"
+    d = past_door(where, who)
+    if d is not None and d < 60:
+        return "at the front door"
+    p = where.get(who)
+    near = min(((_d(p, where[k]), k) for k in PLACES if k in where), default=(1e9, None)) if p else (1e9, None)
+    return f"by {PLACES[near[1]]}" if near[0] < NEAR else "in the living room"
+
+
 def describe(where, char):
-    """One sentence on where the guest is, relative to the room and to the speaker."""
-    p, me = where.get("player"), where.get(char)
-    if not p:
+    """Where the guest and the speaker are, in plain words."""
+    if not where.get("player"):
         return ""
-    if outside(where):
-        place = "out in the hallway, outside the apartment"
-    else:
-        near = min(((_d(p, where[k]), k) for k in PLACES if k in where), default=(1e9, None))
-        place = f"by {PLACES[near[1]]}" if near[0] < NEAR else "in the living room"
-    rel = ""
+    out = f"The guest is {_place(where, 'player')}"
+    me = where.get(char)
     if me:
-        d = _d(p, me)
-        rel = (f", right next to {char.capitalize()}" if d < CLOSE else
-               f", far from {char.capitalize()}" if d > FAR else "")
-    return f"The guest is {place}{rel}."
+        d = _d(where["player"], me)
+        out += (f", right next to {char.capitalize()}" if d < CLOSE else
+                f", far from {char.capitalize()}" if d > FAR else "")
+        out += f". {char.capitalize()} is {_place(where, char)}"
+    return out + "."

@@ -46,8 +46,13 @@ static void logf(const char *fmt, ...) {
         if (n && n < MAX_PATH - 40) {
             strcat(dir, "\\FacadeFanRemake");
             CreateDirectoryA(dir, NULL);
+            size_t at = strlen(dir);
             strcat(dir, "\\bridge.log");
             g_log = fopen(dir, "a");
+            if (!g_log) {  // (held open elsewhere: one play session wrote nothing) a log of our own
+                _snprintf(dir + at, MAX_PATH - at, "\\bridge-%lu.log", GetCurrentProcessId());
+                g_log = fopen(dir, "a");
+            }
         }
     }
     if (g_log) {
@@ -84,6 +89,12 @@ static void perf_due(JNIEnv *env, jclass cls);
 static void perf_saw_gesture(int ch, int part, int script);
 static void perf_saw_face(int ch, int expr, int a, int b);
 static void perf_saw_gaze(int ch, int target, int a, int b, int c);
+// scene.cpp: the story paused while a scene plays
+static void scene_hold(JNIEnv *env, jclass cls);
+static bool scene_on();
+static bool door_guard(JNIEnv *env, int ch, int part, jint &script);
+static void speech_started(int ch);
+static void speech_finished(int ch);
 
 BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
@@ -373,7 +384,14 @@ JNI_FN(void, pushMultipleAnimationScripts, jint ch, jint s1, jint s2, jint s3, j
     std::string perform;
     if (layer == 7) {  // speech: let the line service write this line, if it's running
         int g = generated_line(ch, s1, s2, s3, s4, world_json(env), perform);
+        // A scene is on: the story waits here (this character's thread is held) until it's over.
+        for (int tries = 0; g == -2 && tries < 3; tries++) {
+            scene_hold(env, cls);
+            perform.clear();
+            g = generated_line(ch, s1, s2, s3, s4, world_json(env), perform);
+        }
         if (g > 0) { s1 = g; s2 = s3 = s4 = -1; } else perform.clear();
+        speech_started(ch);
     }
     CALL(void, pushMultipleAnimationScripts, 36, (JNIEnv *, jclass, jint, jint, jint, jint, jint, jint, jobject),
          env, cls, ch, s1, s2, s3, s4, layer, act);
@@ -391,6 +409,7 @@ JNI_FN(void, abortAnimationScripts, jint ch, jint layer) {
 // ---- gestures, face, gaze ----
 JNI_FN(void, doGestureAnimation, jint ch, jint gesture, jint a, jobject act) {
     logf("doGestureAnimation ch=%d gesture=%d arg=%d", ch, gesture, a);  // (gesture = arm part, arg = script)
+    door_guard(env, ch, gesture, a);
     perf_saw_gesture(ch, gesture, a);
     CALL(void, doGestureAnimation, 24, (JNIEnv *, jclass, jint, jint, jint, jobject), env, cls, ch, gesture, a, act);
     perf_due(env, cls);
@@ -505,6 +524,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_facade_nativeinterface_NativeAnimation
         bool rewrite = t && understood_text(t, better);  // also records the real words for the line writer
         if (t) env->ReleaseStringUTFChars(s, t);
         if (rewrite) return env->NewStringUTF(better.c_str());  // the drama manager reads the restated text
+        // (an empty restatement: the words belong to a scene, and the paused drama manager hears nothing)
     }
     return s;
 }
@@ -517,7 +537,10 @@ __declspec(dllexport) bool AblCallbackAPI_PlayerEnteredText(char *const text) {
 }
 __declspec(dllexport) bool AblCallbackAPI_ScriptFinished(int ch, int script) {
     logf("ScriptFinished ch=%d script=%d", ch, script);
-    if (script == 7) restore_lines(ch);  // (the second argument is the layer; 7 = speech)
+    if (script == 7) {  // (the second argument is the layer; 7 = speech)
+        restore_lines(ch);
+        speech_finished(ch);
+    }
     static bool(*f)(int, int) = (bool (*)(int, int))orig("?AblCallbackAPI_ScriptFinished@@YA_NHH@Z");
     return f(ch, script);
 }
@@ -526,3 +549,4 @@ __declspec(dllexport) bool AblCallbackAPI_ScriptFinished(int ch, int script) {
 #include "inject.cpp"
 #include "perform.cpp"
 #include "world.cpp"
+#include "scene.cpp"

@@ -136,16 +136,27 @@ out. Nobody ever follows the guest.
     `*LEAVEFORKITCHEN` beats);
   - the guest walks into the hallway after coming in.
 
-  While a scene is on, Grace and Trip play it for real, and the story lines the drama manager wants
-  are held back. A scene always gets 2 held-back lines or 30 s. After that, an LLM judge, leaning
-  toward staying, decides per story line. The scene ends when:
-  - the guest's own words return to the evening;
-  - 6 story lines have been held back;
-  - the guest has been quiet for 50 s.
-
-  The first story line afterwards bridges from the scene and works in what was held back. While a
-  scene is on, the parser gets the guest's raw words, not a restatement. A restatement such as "I
-  should go." would make the drama manager act on it.
+  **A scene pauses the story** (`engine/bridge/scene.cpp`, revised after the first play test). The
+  first version swapped each story line for an improvised one while the drama manager carried on
+  underneath. Its actions then contradicted the words (Trip shut the door while saying "I'm
+  coming!"), and whole beats, the divorce question among them, went by improvised away.
+  - Now the line service answers the next story push with `hold`. That character's drama-manager
+    thread stays inside its push, so its behaviours and its beat can't move on. Grace and Trip are
+    separate threads; the other one is held at their own next line.
+  - Meanwhile the held thread asks `/scene` what happens next and pushes the scene lines itself,
+    with fresh action objects. The hosts answer each thing the guest says, and chime in once after
+    12 s of quiet.
+  - A scene line never cuts off a line still playing. The engine side records when speech finishes,
+    in a small shared memory block.
+  - The guest's words during a scene go to the scene only (`textSensor` returns nothing).
+  - The scene ends when the guest's words turn back to the evening (the classifier, with examples
+    such as "anyway, I'd love a glass of wine"), after 20 s with nothing added, after 4 minutes, or
+    when a hallway scene's guest comes back in. The held story line then plays, bridged from the
+    scene.
+  - Scenes don't start before the guest has come in: the greeting stays the original's.
+  - In testing, the drama manager survived scenes of 35 to 131 s and resumed at the held line.
+    Its "MISSED THE DIALOG COMMIT CUE" and expression-timeout warnings occur at the same rate
+    without scenes.
 - **Positions** (`engine/bridge/world.cpp`). Every line request carries everyone's floor position
   (`getObjectPosition`). The service describes where the guest is: by the bar, in the hallway, next
   to the speaker.
@@ -160,6 +171,13 @@ out. Nobody ever follows the guest.
   manager's position reads (`getObjectPosition`, `getAllObjectPositions`) put them just inside the
   doorway. Its "leaving the apartment" test never fires, so there's no warning, no escalation and no
   eviction. Walking on toward the elevator shows the real position, so leaving still ends the evening.
+  - The catch, found in the first play test: believing the guest was inside, Trip shut the front
+    door on them. The game has no way back in after that.
+  - Trip shuts the door with a right-arm gesture (script 42, which plays `closedoor2.wav`; 39
+    opens it). While the guest isn't inside, `door_guard` swaps that gesture for his resting arm,
+    so the door stays open.
+- **Following into the hallway.** With the guest outside, following starts at 100 units instead of
+  170 and stops 55 units short. A host still in the room walks to the doorway first.
 - **Typing.** The engine's typing filter (`+0xa19b0`) now accepts `*`, for actions. Subtitles are
   capped at 140 characters, because longer ones overran the engine's buffer.
 - `FFR_NO_FOLLOW=1` and `FFR_NO_DISGUISE=1` turn the two bridge behaviours off. The drama manager's

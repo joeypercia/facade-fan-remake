@@ -76,6 +76,11 @@ static bool understood_text(const char *text, std::string &out) {
     std::string reply;
     DWORD t0 = GetTickCount();
     if (!http_post(L"/understand", "{\"text\":" + json_str(text) + "}", reply, 1500)) return false;
+    if (reply.find("\"hide\": true") != std::string::npos) {  // scene words: the scene answers them
+        logf("understand: \"%s\" goes to the scene (%lu ms)", text, GetTickCount() - t0);
+        out.clear();
+        return true;
+    }
     size_t at = reply.find("\"text\": \"");
     if (at == std::string::npos) return false;
     for (size_t i = at + 9; i < reply.size() && reply[i] != '"'; i++) {
@@ -91,8 +96,31 @@ static bool understood_text(const char *text, std::string &out) {
     return !out.empty() && out != text;
 }
 
-// Returns the script to push instead (one generated line), or -1 to push the original. `where` is
-// everyone's position (world.cpp); `perform` gets the line's performance (see perform.cpp).
+static int json_int(const std::string &reply, const char *key, int dflt = -1) {
+    std::string k = std::string("\"") + key + "\": ";
+    size_t at = reply.find(k);
+    return at == std::string::npos ? dflt : atoi(reply.c_str() + at + k.size());
+}
+
+// A generated line is in the reply: wait for the engine side to patch its table and queue the voice
+// file. Returns the script to push, or -1 if the engine didn't confirm.
+static int engine_ready(int ch, const std::string &reply, std::string &perform, DWORD t0) {
+    int script = json_int(reply, "script");
+    if (script <= 0) return -1;
+    std::string ack = inject_dir() + kChar[ch] + "_" + std::to_string(script) + ".ack";
+    for (int i = 0; i < 200 && GetFileAttributesA(ack.c_str()) == INVALID_FILE_ATTRIBUTES; i++) Sleep(5);
+    bool acked = DeleteFileA(ack.c_str()) != 0;
+    logf("line service: generated %s #%d in %lu ms, engine %s: %s", kChar[ch], script, GetTickCount() - t0,
+         acked ? "ready" : "DID NOT CONFIRM (original plays)", reply.c_str());
+    size_t at;
+    if ((at = reply.find("\"perform\": \"")) != std::string::npos)
+        perform = reply.substr(at + 12, reply.find('"', at + 12) - (at + 12));
+    return acked ? script : -1;
+}
+
+// Returns the script to push instead (one generated line), -1 to push the original, or -2: hold
+// this line, a scene is on (scene.cpp). `where` is everyone's position (world.cpp); `perform` gets
+// the line's performance (see perform.cpp).
 static int generated_line(int ch, int s1, int s2, int s3, int s4, const std::string &where, std::string &perform) {
     if (ch < 0 || ch > 1 || s1 <= 0) return -1;
     char head[128];
@@ -102,22 +130,15 @@ static int generated_line(int ch, int s1, int s2, int s3, int s4, const std::str
     std::string reply;
     DWORD t0 = GetTickCount();
     if (!http_post(L"/line", body, reply, 6500)) return -1;  // service down or overloaded: originals
+    if (reply.find("\"hold\": true") != std::string::npos) {
+        logf("line service: hold [%d,%d,%d,%d]: a scene is on", s1, s2, s3, s4);
+        return -2;
+    }
     if (reply.find("\"replace\": true") == std::string::npos) {
         logf("line service: keep original [%d,%d,%d,%d] (%lu ms) %s", s1, s2, s3, s4, GetTickCount() - t0, reply.c_str());
         return -1;
     }
-    size_t at = reply.find("\"script\": ");
-    int script = at == std::string::npos ? -1 : atoi(reply.c_str() + at + 10);
-    if (script <= 0) return -1;
-    // Wait for the engine side to patch its table and queue the voice file.
-    std::string ack = inject_dir() + kChar[ch] + "_" + std::to_string(script) + ".ack";
-    for (int i = 0; i < 200 && GetFileAttributesA(ack.c_str()) == INVALID_FILE_ATTRIBUTES; i++) Sleep(5);
-    bool acked = DeleteFileA(ack.c_str()) != 0;
-    logf("line service: generated %s #%d in %lu ms, engine %s: %s", kChar[ch], script, GetTickCount() - t0,
-         acked ? "ready" : "DID NOT CONFIRM (original plays)", reply.c_str());
-    if ((at = reply.find("\"perform\": \"")) != std::string::npos)
-        perform = reply.substr(at + 12, reply.find('"', at + 12) - (at + 12));
-    return acked ? script : -1;
+    return engine_ready(ch, reply, perform, t0);
 }
 
 // ======================= engine side =======================

@@ -1,0 +1,21 @@
+# The play session that locked the guest out: step in, then straight back out to the hallway while
+# the hosts are still greeting (before the front door is shut), and ask Trip to come out and talk.
+# Checks: "door: ... leaves the front door open", someone follows out, the guest can walk back in.
+0 shots 3
+@tr_intro_end+32 key J 0.2
+@tr_intro_end+36 key RETURN 0.2
+@tr_intro_end+50 key UP 1.5
+@tr_intro_end+100 key UP 2.5
+@tr_intro_end+108 say hi guys!
+@tr_intro_end+115 key DOWN 4
+@tr_intro_end+120 key DOWN 4
+@tr_intro_end+125 key DOWN 4
+@tr_intro_end+130 key DOWN 4
+@tr_intro_end+140 say trip, come out here for a sec, I need to talk to you privately
+@tr_intro_end+165 say (whispers) is everything ok with you two?
+@tr_intro_end+190 say ok, let's go back inside
+@tr_intro_end+195 key UP 4
+@tr_intro_end+200 key UP 4
+@tr_intro_end+205 key UP 4
+@tr_intro_end+210 key UP 4
+@tr_intro_end+225 say your apartment looks great

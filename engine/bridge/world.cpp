@@ -41,6 +41,7 @@ static bool world_pos(JNIEnv *env, int sprite, float &x, float &z) {
 // stopping a conversation's distance short. Any walk of the drama manager's own wins: we back off.
 static const float kFollowFrom = 170;   // start following when the guest is this far from both
 static const float kStopShort = 70;     // stop this far from the guest
+static const float kFollowFromHall = 100, kStopShortHall = 55;  // the same, with the guest in the hallway
 static DWORD g_dm_walk[2];              // tick of the drama manager's last walkStep per character
 static jobject g_dm_walk_act[2];        // and its Walk action (global ref), to see when it's done
 static int g_following = -1;
@@ -119,14 +120,21 @@ static void follow_tick(JNIEnv *env) {
     for (int k = 0; k < 2; k++) d[k] = hypotf(c[k][0] - px, c[k][1] - pz);
     int ch = d[0] < d[1] ? 0 : 1;
     bool busy = dm_walking(env, ch);
-    if (d[ch] < kFollowFrom * (g_following == ch ? 0.6f : 1.0f) || busy) {
+    // Out in the hallway a conversation happens closer, and on the other side of the door frame.
+    bool hall = past_door(px, pz) < -20;
+    float from = hall ? kFollowFromHall : kFollowFrom, stop = hall ? kStopShortHall : kStopShort;
+    if (d[ch] < from * (g_following == ch ? 0.6f : 1.0f) || busy) {
         if (g_following >= 0) logf("follow: %s stops (guest %.0f away%s)", g_following ? "trip" : "grace", d[ch],
                                    busy ? ", drama manager walking" : "");
         g_following = -1;
         return;
     }
-    float k = (d[ch] - kStopShort) / d[ch];
+    float k = (d[ch] - stop) / d[ch];
     float tx = c[ch][0] + (px - c[ch][0]) * k, tz = c[ch][1] + (pz - c[ch][1]) * k;
+    if (hall && past_door(c[ch][0], c[ch][1]) > 40) {  // still in the room: through the doorway first
+        tx = g_door[0] + g_in[0] * 10;
+        tz = g_door[1] + g_in[1] * 10;
+    }
     jclass walk_cls = env->FindClass("facade/primact/Walk");
     jclass pt_cls = env->FindClass("facade/util/Point3D");
     jclass nai = env->FindClass("facade/nativeinterface/NativeAnimationInterface");
