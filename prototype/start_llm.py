@@ -11,7 +11,8 @@ cmd = [
     "-m", LLM_MODEL,
     "--host", "127.0.0.1", "--port", "8088",
     "-ngl", "99",            # whole model on the GPU
-    "-c", "8192",            # enough for the beat prompt plus tonight's exchanges
+    "-c", "4096",            # enough for one line's prompt plus tonight's recent exchanges
+    "-ctk", "q8_0", "-ctv", "q8_0",  # 8-bit KV cache: with the 4K context, 6.1 -> 5.4 GB of GPU memory
     "-fa", "on",             # flash attention
     "--jinja",               # use the model's chat template (needed for enable_thinking=False)
     "--reasoning", "off",    # no hidden thinking pass: it would add seconds before the first line

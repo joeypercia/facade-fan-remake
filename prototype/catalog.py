@@ -50,7 +50,9 @@ class Catalog:
         """(similarity, line) of the closest recorded line for this character."""
         if self._index is None:
             from sentence_transformers import SentenceTransformer
-            self._model = SentenceTransformer("BAAI/bge-small-en-v1.5")
+            # On the CPU: a 33M-parameter model embeds one line in milliseconds there, and keeping it
+            # off the GPU leaves that memory for the LLM and the voice model.
+            self._model = SentenceTransformer("BAAI/bge-small-en-v1.5", device="cpu")
             self._index = {}
             for ch in ("grace", "trip"):
                 rec = [l for l in self.lines if l["character"] == ch and l["audio"]]

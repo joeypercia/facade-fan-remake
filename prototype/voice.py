@@ -103,6 +103,39 @@ def quiet_engine():
             mod.tqdm = partial(mod.tqdm, disable=True)
 
 
+def load_fp16(engine_cls):
+    """Load Chatterbox Turbo in half precision: its two big parts are converted on the CPU before
+    they reach the GPU (loading straight to the GPU in fp32 would set the memory peak). About
+    1.4 GB of weights instead of 2.7. Generation runs under autocast so fp32 inputs meet fp16
+    weights; the small voice encoder stays fp32."""
+    import functools
+    import torch
+    m = engine_cls.from_pretrained(device="cpu")
+    m.t3 = m.t3.half().to("cuda").eval()
+    m.s3gen = m.s3gen.half().to("cuda").eval()
+    m.ve = m.ve.to("cuda").eval()
+    # Inference only. With gradients on, every stored voice conditioning kept its whole autograd
+    # history: ~136 MB each, 1.6 GB for the 12 voices.
+    for part in (m.t3, m.s3gen, m.ve):
+        part.requires_grad_(False)
+    m.device = "cuda"
+    if getattr(m, "conds", None) is not None:
+        m.conds = m.conds.to("cuda")
+    torch.cuda.empty_cache()
+
+    def amp(fn):
+        @functools.wraps(fn)
+        def run(*a, **k):
+            with torch.inference_mode(), torch.autocast("cuda", dtype=torch.float16):
+                out = fn(*a, **k)
+            return out.float() if torch.is_tensor(out) else out
+        return run
+
+    m.generate = amp(m.generate)
+    m.prepare_conditionals = amp(m.prepare_conditionals)
+    return m
+
+
 def speakable(text):
     """Drop *stage business* and any bracket tag Turbo doesn't know; None if nothing is left to say."""
     t = re.sub(r"\*[^*]*\*", " ", text)
@@ -162,7 +195,7 @@ class Voices:
     def load(self):
         quiet_engine()
         from chatterbox.tts_turbo import ChatterboxTurboTTS
-        self.model = ChatterboxTurboTTS.from_pretrained(device="cuda")
+        self.model = load_fp16(ChatterboxTurboTTS)
         for ch, allowed in VOICE_SYNTHESIS.items():
             if not allowed:
                 continue

@@ -33,9 +33,11 @@ def speech_tokens(t3, t3_cond, text_tokens, temperature=0.8, top_k=1000, top_p=0
     procs = LogitsProcessorList([TemperatureLogitsWarper(temperature), TopKLogitsWarper(top_k),
                                  TopPLogitsWarper(top_p), RepetitionPenaltyLogitsProcessor(repetition_penalty)])
     start = t3.hp.start_speech_token * torch.ones_like(text_tokens[:, :1])
-    embeds, _ = t3.prepare_input_embeds(t3_cond=t3_cond, text_tokens=text_tokens, speech_tokens=start, cfg_weight=0.0)
-    out = t3.tfmr(inputs_embeds=embeds, use_cache=True)
-    past, logits = out.past_key_values, t3.speech_head(out[0][:, -1:])
+    with _amp(t3):
+        embeds, _ = t3.prepare_input_embeds(t3_cond=t3_cond, text_tokens=text_tokens, speech_tokens=start,
+                                            cfg_weight=0.0)
+        out = t3.tfmr(inputs_embeds=embeds, use_cache=True)
+        past, logits = out.past_key_values, t3.speech_head(out[0][:, -1:]).float()
     history = start
     for _ in range(max_len):
         probs = F.softmax(procs(history, logits[:, -1, :]), dim=-1)
@@ -43,9 +45,16 @@ def speech_tokens(t3, t3_cond, text_tokens, temperature=0.8, top_k=1000, top_p=0
         if int(tok) == t3.hp.stop_speech_token:
             return
         history = torch.cat([history, tok], dim=1)
-        yield int(tok)
-        out = t3.tfmr(inputs_embeds=t3.speech_emb(tok), past_key_values=past, use_cache=True)
-        past, logits = out.past_key_values, t3.speech_head(out[0])
+        yield int(tok)  # (outside autocast: the caller's code never runs in half precision)
+        with _amp(t3):
+            out = t3.tfmr(inputs_embeds=t3.speech_emb(tok), past_key_values=past, use_cache=True)
+            past, logits = out.past_key_values, t3.speech_head(out[0]).float()
+
+
+def _amp(module):
+    """Autocast to fp16 when the model's weights are fp16 (voice.load_fp16); a no-op otherwise."""
+    half = next(module.parameters()).dtype == torch.float16
+    return torch.autocast("cuda", dtype=torch.float16, enabled=half)
 
 
 class _Chunker:
@@ -61,9 +70,10 @@ class _Chunker:
         span = self.tokens[start:end + (0 if final else LOOKAHEAD)]
         if final:
             span = span + [S3GEN_SIL] * 3
-        wav, _ = m.s3gen.inference(speech_tokens=torch.tensor(span, device=m.device), ref_dict=m.conds.gen,
-                                   n_cfm_timesteps=2)
-        wav = wav.squeeze(0)
+        with _amp(m.s3gen):
+            wav, _ = m.s3gen.inference(speech_tokens=torch.tensor(span, device=m.device), ref_dict=m.conds.gen,
+                                       n_cfm_timesteps=2)
+        wav = wav.squeeze(0).float()
         lead = FADE if self.tail is not None else 0
         lo = (a - start) * SAMPLES_PER_TOKEN - lead
         hi = len(wav) if final else (end - start) * SAMPLES_PER_TOKEN
