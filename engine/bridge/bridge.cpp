@@ -66,12 +66,18 @@ static void engine_attach();
 static void autopilot_attach(HMODULE eng);
 static void scroll_text_box(HMODULE eng);
 // inject.cpp: generated lines
-static int generated_line(int ch, int s1, int s2, int s3, int s4);
+static int generated_line(int ch, int s1, int s2, int s3, int s4, std::string &perform);
 static void report_heard(const char *text);
 static bool understood_text(const char *text, std::string &out);
 static const char *redirect_wav(const char *name, std::string &keep);
 static void restore_lines(int ch);
 static void inject_attach();
+// perform.cpp: LLM-directed expression, gesture and gaze
+static void perf_start(JNIEnv *env, jclass cls, int ch, const char *spec);
+static void perf_due(JNIEnv *env, jclass cls);
+static void perf_saw_gesture(int ch, int part, int script);
+static void perf_saw_face(int ch, int expr, int a, int b);
+static void perf_saw_gaze(int ch, int target, int a, int b, int c);
 
 BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
@@ -336,12 +342,14 @@ JNI_FN(void, pushAnimationUScript, jint ch, jint script, jint layer, jobject act
 }
 JNI_FN(void, pushMultipleAnimationScripts, jint ch, jint s1, jint s2, jint s3, jint s4, jint layer, jobject act) {
     logf("pushMultipleAnimationScripts ch=%d scripts=%d,%d,%d,%d layer=%d", ch, s1, s2, s3, s4, layer);
+    std::string perform;
     if (layer == 7) {  // speech: let the line service write this line, if it's running
-        int g = generated_line(ch, s1, s2, s3, s4);
-        if (g > 0) { s1 = g; s2 = s3 = s4 = -1; }
+        int g = generated_line(ch, s1, s2, s3, s4, perform);
+        if (g > 0) { s1 = g; s2 = s3 = s4 = -1; } else perform.clear();
     }
     CALL(void, pushMultipleAnimationScripts, 36, (JNIEnv *, jclass, jint, jint, jint, jint, jint, jint, jobject),
          env, cls, ch, s1, s2, s3, s4, layer, act);
+    if (!perform.empty()) perf_start(env, cls, ch, perform.c_str());
 }
 JNI_FN(void, pushPoseScript, jint ch, jint script, jobject act) {
     logf("pushPoseScript ch=%d script=%d", ch, script);
@@ -354,27 +362,35 @@ JNI_FN(void, abortAnimationScripts, jint ch, jint layer) {
 
 // ---- gestures, face, gaze ----
 JNI_FN(void, doGestureAnimation, jint ch, jint gesture, jint a, jobject act) {
-    logf("doGestureAnimation ch=%d gesture=%d arg=%d", ch, gesture, a);
+    logf("doGestureAnimation ch=%d gesture=%d arg=%d", ch, gesture, a);  // (gesture = arm part, arg = script)
+    perf_saw_gesture(ch, gesture, a);
     CALL(void, doGestureAnimation, 24, (JNIEnv *, jclass, jint, jint, jint, jobject), env, cls, ch, gesture, a, act);
+    perf_due(env, cls);
 }
 JNI_FN(void, doFullExpressionBaseAnimation, jint ch, jint expr, jint a, jint b, jobject act) {
     logf("doFullExpressionBaseAnimation ch=%d expr=%d args=%d,%d", ch, expr, a, b);
+    perf_saw_face(ch, expr, a, b);
     CALL(void, doFullExpressionBaseAnimation, 28, (JNIEnv *, jclass, jint, jint, jint, jint, jobject),
          env, cls, ch, expr, a, b, act);
+    perf_due(env, cls);
 }
 JNI_FN(void, doFullExpressionMoodAnimation, jint ch, jint expr, jint a, jint b, jobject act) {
     logf("doFullExpressionMoodAnimation ch=%d expr=%d args=%d,%d", ch, expr, a, b);
     CALL(void, doFullExpressionMoodAnimation, 28, (JNIEnv *, jclass, jint, jint, jint, jint, jobject),
          env, cls, ch, expr, a, b, act);
+    perf_due(env, cls);  // (re-issued every ~0.5 s: the clock for timed gestures)
 }
 JNI_FN(void, setGazeTracking, jint ch, jint target, jfloat x, jfloat y, jfloat z, jint a, jint b, jint c) {
     logf("setGazeTracking ch=%d target=%d at=(%.0f,%.0f,%.0f) args=%d,%d,%d", ch, target, x, y, z, a, b, c);
+    perf_saw_gaze(ch, target, a, b, c);
     CALL(void, setGazeTracking, 40, (JNIEnv *, jclass, jint, jint, jfloat, jfloat, jfloat, jint, jint, jint),
          env, cls, ch, target, x, y, z, a, b, c);
+    perf_due(env, cls);
 }
 JNI_FN(void, miscLittleAction, jint ch, jint action, jint a, jfloat f) {
     logf("miscLittleAction ch=%d action=%d arg=%d f=%.2f", ch, action, a, f);
     CALL(void, miscLittleAction, 24, (JNIEnv *, jclass, jint, jint, jint, jfloat), env, cls, ch, action, a, f);
+    perf_due(env, cls);
 }
 
 // ---- movement and objects ----
@@ -410,6 +426,7 @@ JNI_FN(void, music, jint a, jint b) {
 
 // ---- the player's typing, as the drama manager reads it ----
 extern "C" JNIEXPORT jstring JNICALL Java_facade_nativeinterface_NativeAnimationInterface_textSensor(JNIEnv *env, jclass cls) {
+    perf_due(env, cls);
     jstring s = CALL(jstring, textSensor, 8, (JNIEnv *, jclass), env, cls);
     if (s) {
         const char *t = env->GetStringUTFChars(s, NULL);
@@ -437,3 +454,4 @@ __declspec(dllexport) bool AblCallbackAPI_ScriptFinished(int ch, int script) {
 
 #include "autopilot.cpp"
 #include "inject.cpp"
+#include "perform.cpp"

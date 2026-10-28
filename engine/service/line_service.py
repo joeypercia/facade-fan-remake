@@ -3,7 +3,8 @@
 The bridge (in the game's Java process) calls this for every line before it plays:
 
     POST /line  {"char": 0|1, "scripts": [s1, s2, s3, s4]}
-        -> {"replace": true, "script": s, "file": n, "text": "..."} or {"replace": false}
+        -> {"replace": true, "script": s, "file": n, "text": "...", "perform": "..."} or {"replace": false}
+           ("perform": the line's expression, gesture and gaze for the bridge; see performance.py)
     POST /heard {"text": "..."}   what the player typed (tonight's memory)
 
 For a replacement it writes, into %LOCALAPPDATA%\\FacadeFanRemake\\inject:
@@ -37,6 +38,7 @@ sys.path.insert(0, str(ROOT / "prototype"))
 sys.path.insert(0, str(ROOT / "game"))
 
 import facade_formats as ff  # noqa: E402
+import performance  # noqa: E402
 from catalog import Catalog  # noqa: E402
 from config import LLM_URL  # noqa: E402
 from phonemes import text_to_codes  # noqa: E402
@@ -233,6 +235,12 @@ class Lines:
                 self.memory.append((char, plain.strip()))
                 return {"replace": False, "why": "same as original"}
             t1 = time.perf_counter()
+            # The acting (expression, gesture, gaze). Chosen before the voice renders, not alongside
+            # it: sharing the GPU slowed both more than doing them one after the other.
+            direction = " ".join(w.lower() for w in line["direction"]) or "natural"
+            recent = "\n".join(f"{who.upper()}: {t}" for who, t in self.memory[-4:])
+            pick = performance.choose(char, text, direction, recent, timeout=1.0)
+            t2 = time.perf_counter()
             voiced = self.voice(char, line, text)
             if voiced is None:
                 return {"replace": False, "why": "voice off for this character"}
@@ -251,9 +259,11 @@ class Lines:
         stem.with_suffix(".job.tmp").write_text(f"file={file_no}\nwav={wav_path}\n", encoding="utf-8")
         os.replace(stem.with_suffix(".job.tmp"), stem.with_suffix(".job"))  # the job file appears last
         self.memory.append((char, text))
-        log(f"{char} #{script} [{emotion}] {time.perf_counter() - t0:.2f}s (words {t1 - t0:.2f}s)\n"
-            f"    was: {original}\n    now: {text}")
-        return {"replace": True, "script": script, "file": file_no, "text": text}
+        perform = performance.spec(char, dict(pick), text, len(audio) / OUT_SR)
+        log(f"{char} #{script} [{emotion}] {time.perf_counter() - t0:.2f}s (words {t1 - t0:.2f}s, "
+            f"acting {t2 - t1:.2f}s)\n"
+            f"    was: {original}\n    now: {text}\n    acting: {pick or 'none chosen'}")
+        return {"replace": True, "script": script, "file": file_no, "text": text, "perform": perform}
 
     def heard(self, text):
         text = text.strip()

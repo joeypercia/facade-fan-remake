@@ -1,0 +1,13 @@
+# Performance test: into the apartment, a few things said, frames every 2 s.
+# The name box appears ~25 s after the title music ends. Pick the first "J" name. The player starts
+# facing the apartment door (LEFT/RIGHT held 1.2 s turns ~90 degrees); walk up to it, wait for Trip
+# to open it, walk in, talk.
+0 shots 2
+@tr_intro_end+32 key J 0.2
+@tr_intro_end+36 key RETURN 0.2
+@tr_intro_end+50 key UP 1.5
+@tr_intro_end+100 key UP 2.5
+@tr_intro_end+110 say hi guys! it's so good to see you
+@tr_intro_end+135 say your apartment is beautiful, I love the paintings
+@tr_intro_end+160 say I'd love a glass of red wine please
+@tr_intro_end+185 say so how are you two doing? you seem a little tense

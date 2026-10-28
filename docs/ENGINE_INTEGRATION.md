@@ -89,6 +89,40 @@ A 4-minute session with the observe-only bridge (991 calls) showed:
 7. **Latency.** The engine plays a line's audio as one file, so the next line is generated while
    the current one plays.
 
+## LLM performance (step 4, built)
+
+With each generated line, the line service also asks the LLM how it's performed
+(`engine/service/performance.py`), and the bridge plays that on top of the drama manager's behaviours
+(`engine/bridge/perform.cpp`).
+
+- **What the LLM picks:** a facial expression (`doFullExpressionBaseAnimation`, `eFEBase_*`). One
+  gesture, landing on the line's most stressed word:
+  - arm gestures (`doGestureAnimation(char, part, script)`): `part` is the arm (0 left, 1 right,
+    2 both) and `script` is the gesture's `_hold` script from `GraceScript`/`TripScript`;
+  - body gestures (nod, sigh): a one-shot `pushMultipleAnimationScripts` on layer 3.
+
+  And where to look (`setGazeTracking` at a `SpriteID`: the guest, the partner, the bar, the
+  paintings and so on). Each character has a menu of about 15 gestures, each with a short "when to
+  use" hint.
+- **Format:** one line, `face | gesture | word | look`, checked against the menus. A JSON schema made
+  the model spend ~40 tokens on syntax (0.7-0.9 s); the one-line answer takes 0.2-0.3 s. It runs
+  before the voice renders: running both at once on the GPU slowed both.
+- **Playing it safely:** calls go out from the drama manager's own threads (inside its frequent calls
+  into the bridge), each with a fresh action object (`DoGestureAnimation` and the like).
+  `FacadeAsynchronousAction` completion only sets a status on that object, so nothing in the drama
+  manager waits on it.
+  - A gesture only goes on an arm the drama manager has left at rest (`layer_arm_default`), never
+    over a drink, the door or one of its own gestures.
+  - At the line's end, whatever is still ours is undone: arms back to rest, and the drama manager's
+    last expression and gaze re-issued. Anything it changed meanwhile is left alone.
+- **Tested** unattended (`engine/autopilot/perform_test.txt`, hidden desktop, 24 generated lines in
+  5 minutes). Trip's "arms spread", "arms crossed" and "point", and Grace's "welcoming hand",
+  "small emphasis" and "sigh", played on their words. Busy arms were skipped. Arms returned to rest
+  after the line. No errors.
+- **Not yet:** walking somewhere or sitting down. These move the character through the drama
+  manager's staging (where each character stands for each beat), and its walk behaviours would
+  immediately walk them back. They need a hook into the staging, not just the calls above.
+
 ## GPU memory budget (12 GB card)
 
 Measured 2026-10-27 with `engine/service/measure_vram.py`, each piece alone:
@@ -116,7 +150,8 @@ was unchanged (offscreen loudness 0.017 vs. the original take's 0.018).
 ## Unknowns
 
 - How the in-memory script table is laid out, and whether adding a record at runtime is safe.
-- Whether the original behaviours fight LLM-issued gestures and gaze, or can be told to yield.
+- How to move a character (walk to the bar, sit on the couch) without the staging behaviours
+  walking them straight back.
 - Which discourse acts the original NLU emits (the Jess rule files in `util/sources/facade/nlu`).
 - The modern-Windows render stall in the menus (cursor in a black box, 0% CPU).
 

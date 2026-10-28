@@ -91,8 +91,9 @@ static bool understood_text(const char *text, std::string &out) {
     return !out.empty() && out != text;
 }
 
-// Returns the script to push instead (one generated line), or -1 to push the original.
-static int generated_line(int ch, int s1, int s2, int s3, int s4) {
+// Returns the script to push instead (one generated line), or -1 to push the original. `perform`
+// gets the line's performance (see perform.cpp).
+static int generated_line(int ch, int s1, int s2, int s3, int s4, std::string &perform) {
     if (ch < 0 || ch > 1 || s1 <= 0) return -1;
     char body[128];
     _snprintf(body, sizeof body, "{\"char\":%d,\"scripts\":[%d,%d,%d,%d]}", ch, s1, s2, s3, s4);
@@ -112,6 +113,8 @@ static int generated_line(int ch, int s1, int s2, int s3, int s4) {
     bool acked = DeleteFileA(ack.c_str()) != 0;
     logf("line service: generated %s #%d in %lu ms, engine %s: %s", kChar[ch], script, GetTickCount() - t0,
          acked ? "ready" : "DID NOT CONFIRM (original plays)", reply.c_str());
+    if ((at = reply.find("\"perform\": \"")) != std::string::npos)
+        perform = reply.substr(at + 12, reply.find('"', at + 12) - (at + 12));
     return acked ? script : -1;
 }
 
