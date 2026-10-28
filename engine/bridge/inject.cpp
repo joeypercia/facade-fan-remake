@@ -69,6 +69,28 @@ static void report_heard(const char *text) {
     CloseHandle(CreateThread(NULL, 0, heard_thread, body, 0, NULL));
 }
 
+// The player's text restated (by the service's LLM) in phrasing the 2005 parser recognizes.
+// Returns false (keep the original text) if the service isn't running or is slow.
+static bool understood_text(const char *text, std::string &out) {
+    if (!text || !*text || strcmp(text, " ") == 0 || strcmp(text, "warm up nlu") == 0) return false;
+    std::string reply;
+    DWORD t0 = GetTickCount();
+    if (!http_post(L"/understand", "{\"text\":" + json_str(text) + "}", reply, 1500)) return false;
+    size_t at = reply.find("\"text\": \"");
+    if (at == std::string::npos) return false;
+    for (size_t i = at + 9; i < reply.size() && reply[i] != '"'; i++) {
+        if (reply[i] == '\\' && i + 1 < reply.size()) {
+            char e = reply[++i];
+            if (e == 'u' && i + 4 < reply.size()) { out += (char)strtol(reply.substr(i + 1, 4).c_str(), NULL, 16); i += 4; }
+            else out += e == 'n' ? ' ' : e;
+        } else {
+            out += reply[i];
+        }
+    }
+    logf("understand: \"%s\" -> \"%s\" (%lu ms)", text, out.c_str(), GetTickCount() - t0);
+    return !out.empty() && out != text;
+}
+
 // Returns the script to push instead (one generated line), or -1 to push the original.
 static int generated_line(int ch, int s1, int s2, int s3, int s4) {
     if (ch < 0 || ch > 1 || s1 <= 0) return -1;

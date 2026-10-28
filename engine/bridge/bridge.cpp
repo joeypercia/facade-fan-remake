@@ -67,6 +67,7 @@ static void autopilot_attach(HMODULE eng);
 // inject.cpp: generated lines
 static int generated_line(int ch, int s1, int s2, int s3, int s4);
 static void report_heard(const char *text);
+static bool understood_text(const char *text, std::string &out);
 static const char *redirect_wav(const char *name, std::string &keep);
 static void restore_lines(int ch);
 static void inject_attach();
@@ -357,8 +358,10 @@ extern "C" JNIEXPORT jstring JNICALL Java_facade_nativeinterface_NativeAnimation
     if (s) {
         const char *t = env->GetStringUTFChars(s, NULL);
         if (t && *t) logf("textSensor \"%s\"", t);
-        if (t && *t) report_heard(t);
+        std::string better;
+        bool rewrite = t && understood_text(t, better);  // also records the real words for the line writer
         if (t) env->ReleaseStringUTFChars(s, t);
+        if (rewrite) return env->NewStringUTF(better.c_str());  // the drama manager reads the restated text
     }
     return s;
 }

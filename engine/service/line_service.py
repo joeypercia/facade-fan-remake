@@ -106,6 +106,18 @@ class Lines:
             name_rule = "You don't know the guest's name: never use a name for them."
         direction = " ".join(w.lower() for w in line["direction"]) or "natural"
         recent = "\n".join(f"{who.upper()}: {t}" for who, t in self.memory[-14:])
+        # What the guest has said since this character last spoke: the new line should answer it,
+        # unless they can't hear the guest (the argument behind the door, other offscreen lines).
+        since = []
+        offscreen = {"OFFSCREEN", "MUTED"} & set(line["direction"]) or line["beat"].startswith("PBEHINDDOOR")
+        for who, t in reversed(self.memory):
+            if who == char or offscreen:
+                break
+            if who == "guest":
+                since.insert(0, t)
+        answer = (f"The guest just said: \"{' / '.join(since[-3:])}\". {char.capitalize()} hears it: respond to "
+                  f"it naturally (acknowledge it, answer if it's a question) while still doing what the "
+                  f"director's line does.\n") if since else ""
         prompt = [
             {"role": "system", "content": "\n\n".join([
                 SETTING, CHARACTERS["grace"], CHARACTERS["trip"],
@@ -122,12 +134,14 @@ class Lines:
             ])},
             {"role": "user", "content":
                 (f"Tonight so far:\n{recent}\n\n" if recent else "") +
-                f"{char.upper()} speaks next ({direction}). The director's line: \"{original}\"\n" +
+                f"{char.upper()} speaks next ({direction}). The director's line: \"{original}\"\n" + answer +
                 (f"It must still mention: {', '.join(keys)}.\n" if (keys := key_words(original)) else "") +
-                f"At most {max_words(original)} words. Write {char.capitalize()}'s line."},
+                f"At most {max_words(original)} words. Write {char.capitalize()}'s line in your own words, "
+                f"not the director's."},
         ]
-        limit = max_words(original)
-        for attempt in range(2):
+        limit = max_words(original) + (8 if since else 0)  # room to acknowledge the guest
+        plain = re.sub(r"\s*\{name\}\s*,?", " ", original)
+        for attempt in range(3):
             r = requests.post(LLM_URL, timeout=20, json={
                 "messages": prompt, "temperature": 0.7, "top_p": 0.9, "max_tokens": 90,
                 "chat_template_kwargs": {"enable_thinking": False},
@@ -136,10 +150,15 @@ class Lines:
             text = r.json()["choices"][0]["message"]["content"].strip()
             text = re.sub(r'^\s*(grace|trip)\s*[:|]\s*', "", text, flags=re.I).strip().strip('"').strip()
             text = plain_ascii(text.splitlines()[0].strip()) if text else ""
-            if text and len(text.split()) <= limit and all(k.lower() in text.lower() for k in keys):
+            fits = text and len(text.split()) <= limit and all(k.lower() in text.lower() for k in keys)
+            copied = text and same_words(text, plain, threshold=0.85)
+            if fits and not copied:
                 return text
             prompt.append({"role": "assistant", "content": text})
             prompt.append({"role": "user", "content":
+                           "That's the director's line almost word for word. Say it differently, in "
+                           f"{char.capitalize()}'s own words" + (" and respond to what the guest said" if since else "") +
+                           "." if copied else
                            f"Too long or missing details. At most {limit} words, and mention: "
                            f"{', '.join(keys) or 'the same things'}. Only the line."})
         return ""  # couldn't get a faithful line: the original plays
@@ -190,7 +209,7 @@ class Lines:
             if not text:
                 return {"replace": False, "why": "no words"}
             plain = re.sub(r"\s*\{name\}\s*,?", " ", original)
-            if same_words(text, plain, threshold=0.85):
+            if same_words(text, plain, threshold=0.85):  # (only if every retry still copied it)
                 # Essentially the original line: the actor's real performance beats a synthetic copy.
                 self.memory.append((char, plain.strip()))
                 return {"replace": False, "why": "same as original"}
@@ -218,6 +237,43 @@ class Lines:
             self.memory.append(("guest", text))
             log(f"guest: {text}")
 
+    def understand(self, text):
+        """Restate what the player typed in the plain phrasing Façade's 2005 parser recognizes, so the
+        original drama manager picks the right reaction. The real words go to tonight's memory."""
+        text = text.strip()
+        if not text or text in (" ", "warm up nlu"):
+            return text
+        self.heard(text)
+        recent = "\n".join(f"{who.upper()}: {t}" for who, t in self.memory[-6:-1])
+        r = requests.post(LLM_URL, timeout=10, json={
+            "messages": [
+                {"role": "system", "content": UNDERSTAND_PROMPT},
+                {"role": "user", "content": (f"Just before:\n{recent}\n\n" if recent else "") +
+                                            f"The guest typed: {text}"},
+            ],
+            "temperature": 0.2, "max_tokens": 40, "chat_template_kwargs": {"enable_thinking": False},
+        })
+        r.raise_for_status()
+        out = plain_ascii(r.json()["choices"][0]["message"]["content"].strip().splitlines()[0]).strip('"')
+        out = re.sub(r"^(the guest (typed|said|says)|guest|restated)\s*:\s*", "", out, flags=re.I).strip().strip('"')
+        if not out or len(out) > 160:
+            return text
+        log(f"    parser hears: {out}")
+        return out
+
+
+UNDERSTAND_PROMPT = """You help a 2005 keyword-based text parser understand a player in the interactive drama Façade.
+The player is a guest at Grace and Trip's apartment. Restate what the guest typed as ONE short, plain, complete
+sentence (or two) that keeps the same meaning and makes their intent obvious, using everyday words:
+- greetings: "Hi!", "Hello Grace.", "How are you?"
+- agreeing / disagreeing: "Yes.", "I agree.", "No.", "I disagree."
+- drinks: name the drink plainly: "I'd like a glass of merlot.", "I'll have a beer.", "Just water, please."
+- praise / criticism of things or people: "Your apartment is beautiful.", "That painting is ugly."
+- feelings and support: "I'm sorry.", "Are you okay?", "I'm on your side, Grace."
+- topics: marriage, divorce, sex, therapy, affairs, parents, the Italy trip, the wedding picture, the art.
+- flirting, hugging, kissing, leaving: say it plainly ("I want to hug you.", "I should go.").
+Fix spelling and slang ("hows it goin" -> "Hi! How are you?"). Keep names (Grace, Trip). If it's addressed to
+someone, keep who. Never add things the guest didn't mean. Output only the restated sentence."""
 
 STOPWORDS = set("""a an the and or but if so to of in on at for with from by about as into than then that this
 these those there here what when where which who whom why how is are was were be been being am do does did done
@@ -298,6 +354,8 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == "/heard":
                 LINES.heard(body.get("text", ""))
                 out = {"ok": True}
+            elif self.path == "/understand":
+                out = {"text": LINES.understand(body.get("text", ""))}
             else:
                 self.send_error(404)
                 return
