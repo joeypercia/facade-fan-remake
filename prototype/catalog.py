@@ -19,9 +19,11 @@ class Catalog:
         random.Random(seed).shuffle(pool)
         return [l["text"] for l in pool[:n]]
 
-    def reference_clips(self, character, directions, avoid=(), seconds=12.0):
-        """Paths to a few longer recordings marked with any of `directions` (NEUTRAL also matches
-        takes with no direction at all), skipping any marked with `avoid`."""
+    def reference_clips(self, character, directions, avoid=(), seconds=12.0, min_len=2.5, max_len=7.0,
+                        count=None):
+        """Paths to recordings marked with any of `directions` (NEUTRAL also matches takes with no
+        direction at all), skipping any marked with `avoid`, between min_len and max_len seconds
+        long, until `seconds` of audio (or `count` clips) are collected."""
         import soundfile as sf
 
         def fits(l):
@@ -37,10 +39,10 @@ class Catalog:
         for l in pool:
             path = FACADE / l["audio"]
             info = sf.info(path)
-            if 2.5 < info.duration < 7:
+            if min_len < info.duration < max_len:
                 picked.append(path)
                 total += info.duration
-            if total >= seconds:
+            if total >= seconds or (count and len(picked) >= count):
                 break
         return picked
 

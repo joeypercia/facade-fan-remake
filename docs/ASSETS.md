@@ -1,6 +1,6 @@
 # Original asset formats
 
-Notes on how Façade v1.1 lays out its data, so the remaster can load it from a player's install.
+Notes on how Façade v1.1 lays out its data, so the remake can load it from a player's install.
 Paths are relative to the install root (default `C:\Program Files (x86)\Facade`).
 **Confirmed** means verified by tooling in this repo; **hypothesis** means it still needs checking.
 
@@ -168,4 +168,4 @@ the same skeleton, is the main open problem for phase 2.
   and talks to it through shared memory via `nativeaniminterface.dll`.
 - The frame limiter sleeps 10–30 ms per frame based on measured fps (`GetTickCount`).
 - On modern Windows the original menu can stop redrawing: only the cursor moves, inside a black box.
-  This is a rendering stall, not a crash. The remaster's new renderer avoids the old engine entirely.
+  This is a rendering stall, not a crash. The remake's new renderer avoids the old engine entirely.

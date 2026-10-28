@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice Lab</title>
+<style>
+  :root { --ink: #f3ece2; --muted: #b7ab9b; --panel: #1d1714; --line: #3a3029; --accent: #e0a458; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #120e0c; color: var(--ink); font: 16px/1.5 Georgia, serif; padding: 24px 16px; }
+  main { max-width: 760px; margin: 0 auto; }
+  h1 { font-weight: normal; margin: 0 0 4px; }
+  p { color: var(--muted); margin: 0 0 18px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+  select, input, textarea { font: inherit; background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
+  textarea { width: 100%; min-height: 70px; }
+  .variant { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 8px; background: var(--panel); }
+  .variant b { display: block; }
+  .variant small { color: var(--muted); }
+  button { font: inherit; border: 0; border-radius: 6px; padding: 8px 14px; background: var(--accent); color: #1b130d; cursor: pointer; }
+  button:disabled { opacity: 0.5; cursor: progress; }
+  .score { display: flex; gap: 4px; }
+  .score button { background: #2a221d; color: var(--ink); padding: 6px 10px; }
+  .score button.on { background: var(--accent); color: #1b130d; }
+  #log { color: var(--muted); font-size: 13px; white-space: pre-wrap; margin-top: 16px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Voice Lab</h1>
+  <p>Hear the same line rendered different ways, and rate each one. Nothing is saved: the ratings stay on this page.</p>
+  <div class="row">
+    <select id="character"><option value="trip">Trip</option><option value="grace">Grace</option></select>
+    <input id="delivery" value="pointed" title="acting direction" size="14">
+  </div>
+  <textarea id="text">Come on, Grace. It's our anniversary. Can we not do this tonight?</textarea>
+  <div id="variants"></div>
+  <div id="log"></div>
+</main>
+<script>
+const VARIANTS = [
+  ["current", "A · current", "emotion-matched references + style tag, streamed"],
+  ["no_tag", "B · no style tag", "same, without the [sarcastic]/[angry]-style tag"],
+  ["single_take", "C · one continuous take", "conditioned on a single long original recording, no tag"],
+  ["whole", "D · whole sentence", "like A, but rendered in one piece instead of streamed"],
+  ["recording", "E · closest original recording", "the actor's real take nearest in meaning (the target)"],
+];
+const ctx = new AudioContext({ sampleRate: 24000 });
+const log = (s) => (document.getElementById("log").textContent = s);
+const box = document.getElementById("variants");
+for (const [id, name, desc] of VARIANTS) {
+  const el = document.createElement("div");
+  el.className = "variant";
+  el.innerHTML = `<div><b>${name}</b><small>${desc}</small></div>
+    <div class="score">${[1, 2, 3, 4, 5].map((n) => `<button data-n="${n}">${n}</button>`).join("")}</div>
+    <button class="play">Play</button>`;
+  el.querySelector(".play").onclick = async (e) => {
+    const btn = e.target;
+    btn.disabled = true;
+    log(`rendering ${name}…`);
+    try {
+      const r = await fetch("/api/lab", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ character: document.getElementById("character").value, text: document.getElementById("text").value,
+          delivery: document.getElementById("delivery").value, variant: id }) });
+      if (!r.ok) throw new Error(await r.text());
+      const pcm = new Int16Array(await r.arrayBuffer());
+      const buf = ctx.createBuffer(1, pcm.length, 24000);
+      const ch = buf.getChannelData(0);
+      for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(ctx.destination);
+      await ctx.resume();
+      src.start();
+      log(`${name}: "${r.headers.get("X-Said")}" (${buf.duration.toFixed(1)} s)`);
+    } catch (err) { log(`${name} failed: ${err.message}`); }
+    btn.disabled = false;
+  };
+  el.querySelectorAll(".score button").forEach((b) => (b.onclick = () => {
+    el.querySelectorAll(".score button").forEach((x) => x.classList.toggle("on", x === b));
+  }));
+  box.appendChild(el);
+}
+</script>
+</body>
+</html>

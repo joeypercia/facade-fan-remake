@@ -1,6 +1,6 @@
 # Legal, consent and asset policy
 
-Façade Remastered is a free, non-commercial fan project made for fun. It will never be sold,
+Façade Fan Remake is a free, non-commercial fan project made for fun. It will never be sold,
 monetized, or bundled with ads or donations-for-access.
 
 ## What this repository contains
@@ -20,7 +20,7 @@ So this project never commits, uploads, or redistributes:
 - the script: dialogue text, whether pasted in or extracted (for example `data/catalog.json`)
 - anything derived from those files: converted audio, decoded meshes, voice models or voice embeddings
 
-The remaster reads everything it needs from the player's own installed copy, at runtime, on the
+The remake reads everything it needs from the player's own installed copy, at runtime, on the
 player's machine. `tools/check_no_assets.py` enforces this on every commit.
 
 Docs may describe file *formats* (field layouts, how files relate to each other) and may name beat

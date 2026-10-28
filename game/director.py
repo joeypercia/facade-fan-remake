@@ -36,6 +36,8 @@ ENTER|trip       Trip comes back into the room (or ENTER|grace)
 KICKOUT          the guest has been so rude or inappropriate that they are thrown out
 Keep each line short and natural, like real speech: usually one or two sentences.
 Write 2 to 4 dialogue lines, then stop. React specifically to what the guest just said or did.
+Stay consistent with everything said tonight: never contradict what has been established (who ordered
+what, what has been admitted, who is in the room). Answer questions that were just asked before moving on.
 Never reuse a line or phrase either of them already said tonight."""
 
 
@@ -129,7 +131,7 @@ class Director(Brain):
         if retry:
             note += " Write new spoken dialogue now: at least two lines, unlike anything said tonight."
         spoke = False  # at least one new line of real dialogue (3+ words)
-        for line in super().turn(player_input, note=note):
+        for line in super().turn(player_input, note=note, stage=stage):
             key = _norm(line.text)
             if key in self.said:
                 continue  # the model repeated itself: skip the line

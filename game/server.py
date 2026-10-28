@@ -74,7 +74,13 @@ class Game:
         while True:
             job = self.jobs.get()
             try:
-                if job[0] == "start":
+                if job[0] == "lab":
+                    _, args, reply = job
+                    try:
+                        reply.put(self.voices.lab_render(*args))
+                    except Exception as e:
+                        reply.put(e)
+                elif job[0] == "start":
                     self.director = Director(self.catalog, job[1], job[2])
                     self.director.prime()
                     self.emit({"type": "beat", "index": 0, "title": ARC[0]["title"], "staging": ARC[0]["staging"]})
@@ -84,7 +90,8 @@ class Game:
                     text = job[1]
                     # Several messages typed while they were talking count as one turn.
                     while not self.jobs.empty() and self.jobs.queue[0][0] == "say":
-                        text += " " + self.jobs.get()[1]
+                        more = self.jobs.get()[1]
+                        text = more if text == SILENCE else text if more == SILENCE else f"{text} {more}"
                     self._turn(self.director.turn(text))
             except Exception as e:  # keep the evening alive; show the error in the console
                 self.emit({"type": "error", "message": repr(e)})
@@ -100,7 +107,9 @@ class Game:
             self.emit({"type": "line", "id": self.line_seq, "speaker": line.speaker, "text": line.text,
                        "delivery": line.delivery, "emotion": emotion_for(line.delivery),
                        "continues": line.part_of_previous})
-            info = self.voices.say(line) if self.voices else {"source": "subtitle"}
+            seq = self.line_seq
+            info = (self.voices.say(line, on_text=lambda t: self.emit({"type": "line_text", "id": seq, "text": t}))
+                    if self.voices else {"source": "subtitle"})
             self.emit({"type": "line_end", "id": self.line_seq, "source": info.get("source")})
         for ev in self.director.events:
             if ev["type"] == "beat":
@@ -197,10 +206,40 @@ async def start(req: Request):
 
 @app.post("/api/say")
 async def say(req: Request):
-    text = ((await req.json()).get("text") or "").strip()[:400]
+    body = await req.json()
+    if body.get("silence"):
+        GAME.say(SILENCE)
+        return {"ok": True}
+    text = (body.get("text") or "").strip()[:400]
     if text:
         GAME.say(text)
     return {"ok": True}
+
+
+SILENCE = "*says nothing*"  # the guest let the moment pass; counts as their turn
+
+
+@app.get("/lab")
+def lab_page():
+    return FileResponse(HERE / "client" / "lab.html")
+
+
+@app.post("/api/lab")
+async def lab(req: Request):
+    """Render one line a given way for the voice lab. Rendered on the game's worker thread."""
+    if not GAME.voices:
+        raise HTTPException(400, "voices are off")
+    b = await req.json()
+    ch = b.get("character") if b.get("character") in ("grace", "trip") else "trip"
+    variant = b.get("variant", "current")
+    reply = queue.Queue()
+    GAME.jobs.put(("lab", (ch, (b.get("text") or "")[:300], (b.get("delivery") or "neutral")[:40], variant), reply))
+    result = await asyncio.get_running_loop().run_in_executor(None, reply.get)
+    if isinstance(result, Exception):
+        raise HTTPException(500, repr(result))
+    audio, said = result
+    pcm = (np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes()
+    return Response(pcm, media_type="application/octet-stream", headers={"X-Said": said.encode("ascii", "replace").decode()})
 
 
 @app.get("/api/events")

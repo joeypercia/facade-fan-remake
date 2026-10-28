@@ -80,18 +80,20 @@ class Brain:
             "max_tokens": 1, "chat_template_kwargs": {"enable_thinking": False},
         }).raise_for_status()
 
-    def turn(self, player_input, note=None):
+    def turn(self, player_input, note=None, stage=False):
         """Yield Line objects as soon as each one finishes streaming.
-        `note` is extra context for this request only; it isn't kept in the history."""
-        self.history.append({"role": "user", "content": f"{self.player.upper()}: {player_input}"})
-        messages = [{"role": "system", "content": self.system_prompt()}] + self.history[-12:]
+        `note` is extra context for this request only; it isn't kept in the history.
+        With stage=True the input is a stage direction, not something the guest said or did."""
+        content = f"(Stage direction: {player_input})" if stage else f"{self.player.upper()}: {player_input}"
+        self.history.append({"role": "user", "content": content})
+        messages = [{"role": "system", "content": self.system_prompt()}] + self._window()
         if note:
             messages[-1] = {"role": "user", "content": f"{messages[-1]['content']}\n\n[{note}]"}
         t0 = time.perf_counter()
         resp = requests.post(LLM_URL, stream=True, timeout=120, json={
             "messages": messages,
             "stream": True,
-            "temperature": 0.8,
+            "temperature": 0.7,
             "top_p": 0.9,
             "presence_penalty": 0.4,
             "frequency_penalty": 0.3,
@@ -129,6 +131,18 @@ class Brain:
             else:
                 merged.append((l.speaker, l.delivery, l.text))
         self.history.append({"role": "assistant", "content": "\n".join("|".join(m) for m in merged)})
+
+    HISTORY_KEEP = 48   # messages (~24 exchanges) the model sees
+    HISTORY_DROP = 16   # when over, drop this many oldest at once, so the cached prefix rarely moves
+
+    def _window(self):
+        start = getattr(self, "_window_start", 0)
+        if len(self.history) - start > self.HISTORY_KEEP:
+            start += self.HISTORY_DROP
+            if self.history[start]["role"] == "assistant":  # begin on the guest's turn
+                start += 1
+            self._window_start = start
+        return self.history[start:]
 
     def _emit(self, row, t0, final):
         """Split `row` (one output line, possibly still streaming) into sentence Lines.

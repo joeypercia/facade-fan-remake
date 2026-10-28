@@ -1,16 +1,16 @@
-# Façade Remastered
+# Façade Fan Remake
 
 A non-commercial fan mod of **Façade** (2005), the interactive drama by Michael Mateas and Andrew Stern
 (Procedural Arts). You spend an evening with Grace and Trip, old college friends whose marriage is
 coming apart while you're in the room.
 
-The remaster keeps the original story, characters, beats and voice performances. It replaces the
+The remake keeps the original story, characters, beats and voice performances. It replaces the
 2005 natural-language parser and drama manager with a locally run language model, so Grace and Trip
 respond to what you actually say and do.
 
 > **You need your own copy of the original Façade.** This repository contains code and documentation
 > only. It does not contain, and will never contain, any of the original game's audio, animation,
-> textures, or script text. The remaster reads those from your installed copy at runtime.
+> textures, or script text. The remake reads those from your installed copy at runtime.
 > See [docs/LEGAL.md](docs/LEGAL.md).
 
 ## Status
@@ -77,5 +77,5 @@ Façade © 2005–2006 Procedural Arts. Design, engineering, writing, animation 
 Michael Mateas and Andrew Stern. Grace was voiced by Chloe Johnston, Trip by Andy Bayiates.
 Full credits are in [docs/LEGAL.md](docs/LEGAL.md). This project is not affiliated with or endorsed by Procedural Arts.
 
-The remaster's own code is MIT-licensed ([LICENSE](LICENSE)). That license covers this repository's
+The remake's own code is MIT-licensed ([LICENSE](LICENSE)). That license covers this repository's
 code only, not Façade.

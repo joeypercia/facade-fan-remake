@@ -75,6 +75,21 @@ def style_tag(delivery):
     return next((tag for words, tag in STYLE_TAGS if any(w in d for w in words)), "")
 
 
+NEGATIONS = {"no", "not", "never", "don't", "dont", "can't", "cant", "won't", "isn't", "wasn't", "didn't",
+             "doesn't", "nothing", "nobody", "none", "aren't", "shouldn't", "wouldn't", "couldn't"}
+
+
+def same_words(a, b, threshold=0.9):
+    """True if two lines say essentially the same words: near-identical wording and the same
+    negations. (Embedding similarity alone treats "I love you" and "I don't love you" as a match.)"""
+    import difflib
+    wa = re.findall(r"[a-z']+", a.lower())
+    wb = re.findall(r"[a-z']+", b.lower())
+    if set(wa) & NEGATIONS != set(wb) & NEGATIONS:
+        return False
+    return difflib.SequenceMatcher(None, wa, wb).ratio() >= threshold
+
+
 def quiet_engine():
     """Silence Chatterbox's per-call print() and tqdm bars inside its own modules only.
     (Redirecting sys.stdout would also swallow the game's output from other threads.)"""
@@ -172,6 +187,31 @@ class Voices:
             for _ in stream(self.model, "Warming up."):
                 pass
 
+    def lab_render(self, ch, text, delivery, variant):
+        """Render one line a particular way for side-by-side listening. Returns float32 audio at SR.
+        Variants: current, no_tag, single_take, whole, recording."""
+        from streaming import stream
+        import soxr
+        emotion = emotion_for(delivery)
+        if variant == "recording":
+            _, rec = self.catalog.nearest(ch, text)
+            x, sr = sf.read(FACADE / rec["audio"], dtype="float32")
+            return soxr.resample(x, sr, SR), rec["text"]
+        cond = self.conds.get((ch, emotion)) or self.conds[(ch, "neutral")]
+        if variant == "single_take":
+            key = (ch, emotion, "single")
+            if key not in self.conds:
+                directions = EMOTIONS[emotion][0]
+                clips = self.catalog.reference_clips(ch, directions=directions, avoid=BAD_REFERENCE,
+                                                     seconds=6.0, min_len=6.0, max_len=12.0, count=1)
+                self.conds[key] = self._condition(clips[:1]) if clips else cond
+            cond = self.conds[key]
+        self.model.conds = cond
+        tagged = text if variant in ("no_tag", "single_take") else f"{style_tag(delivery)} {text}".strip()
+        if variant == "whole":
+            return self.model.generate(tagged).squeeze(0).cpu().numpy(), tagged
+        return np.concatenate(list(stream(self.model, tagged))), tagged
+
     def _condition(self, clips):
         import soxr
         audio = []
@@ -187,9 +227,11 @@ class Voices:
         finally:
             os.remove(path)
 
-    def say(self, line):
+    def say(self, line, on_text=None):
         """Render one line and stream it to the player. Returns what happened, with timings.
-        info["t_first_audio"] is the perf_counter time the first audio reached the player."""
+        info["t_first_audio"] is the perf_counter time the first audio reached the player.
+        If an original recording is used, line.text becomes its wording and on_text(text) is
+        called before its audio, so subtitles can match."""
         from streaming import stream
         import soxr
         t0 = time.perf_counter()
@@ -203,9 +245,13 @@ class Voices:
         info["match"] = round(sim, 3)
         emotion = emotion_for(line.delivery)
         cond = self.conds.get((line.speaker, emotion)) or self.conds.get((line.speaker, "neutral"))
-        if sim >= RECORDING_MATCH:
+        if sim >= RECORDING_MATCH and same_words(plain, rec["text"]):
             x, sr = sf.read(FACADE / rec["audio"], dtype="float32")
             x = soxr.resample(x, sr, SR)
+            # Say what the recording says: the subtitle and tonight's history follow the audio.
+            line.text = rec["text"]
+            if on_text:
+                on_text(rec["text"])
             info["t_first_audio"] = time.perf_counter()
             self.player.push(x)
             info.update(source="recording", recording=rec["id"], audio_s=len(x) / SR)

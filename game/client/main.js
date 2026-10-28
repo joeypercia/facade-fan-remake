@@ -1,4 +1,4 @@
-// Façade Remastered client: renders the apartment and characters, plays the voices, takes input.
+// Façade Fan Remake client: renders the apartment and characters, plays the voices, takes input.
 import * as THREE from "three";
 import { ConvexGeometry } from "three/addons/geometries/ConvexGeometry.js";
 
@@ -181,6 +181,14 @@ class Character {
   }
   update(dt, talking, lookAt) {
     this.t += dt;
+    // Idle life: now and then, play one of their original gestures instead of standing frozen.
+    this.idleFor = this.clip === this.idle && !talking ? (this.idleFor || 0) + dt : 0;
+    this.nextFidget ??= 5 + Math.random() * 6;
+    if (this.idleFor > this.nextFidget && this.gestures.length) {
+      this.play(this.gestures[Math.floor(Math.random() * this.gestures.length)]);
+      this.idleFor = 0;
+      this.nextFidget = 5 + Math.random() * 6;
+    }
     const J = this.info.joints;
     const fi = this.frameIndex();
     let cur = this.frames.subarray(fi * J * 3, (fi + 1) * J * 3);
@@ -380,16 +388,22 @@ function connect() {
     const ev = JSON.parse(m.data);
     switch (ev.type) {
       case "thinking": $("thinking").hidden = false; break;
-      case "turn_end": $("thinking").hidden = true; break;
+      case "turn_end": $("thinking").hidden = true; awaitingReply = false; break;
       case "line": $("thinking").hidden = true; onLine(ev); break;
       case "audio": onAudio(ev); break;
       case "line_end": onLineEnd(ev); break;
+      case "line_text": {   // an original recording is playing: show its exact words
+        const line = lines.get(ev.id);
+        if (line) line.html = `<b>${LOOKS[line.speaker].name}</b>${stageHtml(ev.text)}`;
+        break;
+      }
       case "beat": showBeat(ev.title); stage(ev.staging, ev.index === 0); break;
       case "cue": onCue(ev); break;
       case "exit": if (chars[ev.who]) { chars[ev.who].target = new THREE.Vector3(260, 0, -60); setTimeout(() => (chars[ev.who].visible = false), 3500); } break;
       case "enter": if (chars[ev.who]) { chars[ev.who].visible = true; chars[ev.who].pos.set(260, 0, -60); chars[ev.who].target = new THREE.Vector3(60, 0, -220); } break;
       case "kickout": $("end-title").textContent = "You've been asked to leave"; break;
       case "end": {
+        ended = true;
         const wait = Math.max(0, Math.max(nextTime, textClock) - now()) + 3;
         setTimeout(() => { $("end").hidden = false; }, wait * 1000);
         $("say").disabled = true;
@@ -401,14 +415,48 @@ function connect() {
 }
 
 // ---------- input ----------
+let awaitingReply = false;       // a turn is in flight on the server
+let lastKey = 0;                 // last keystroke in the input box (performance.now ms)
+let quietSince = null;           // when Grace and Trip last finished talking
+let silentTurns = 0;
+const SILENCE_S = 12;            // how long they wait for the guest before carrying on
+const TYPING_HOLD_S = 4;         // a keystroke this recent means "I'm typing, wait"
+const STALE_DRAFT_S = 25;        // an untouched draft this old no longer holds them
+const MAX_SILENT_TURNS = 4;      // after this many in a row, they wait for the guest
+
+async function send(body) {
+  awaitingReply = true;
+  quietSince = null;
+  await fetch("/api/say", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+}
 $("talk").addEventListener("submit", async (e) => {
   e.preventDefault();
   const text = $("say").value.trim();
   if (!text) return;
   $("say").value = "";
+  silentTurns = 0;
   fadeSoon(addSubtitle("player", `${esc($("name").value)}: ${stageHtml(text)}`), 4);
-  await fetch("/api/say", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
+  await send({ text });
 });
+$("say").addEventListener("input", () => { lastKey = performance.now(); });
+
+// If the guest says nothing for a while, Grace and Trip carry on, unless the guest is typing.
+function checkSilence() {
+  if (!started || awaitingReply || ended || silentTurns >= MAX_SILENT_TURNS) return;
+  const t = now();
+  const talking = Math.max(speakingUntil.grace, speakingUntil.trip, nextTime, textClock) > t;
+  if (talking) { quietSince = null; return; }
+  if (quietSince === null) { quietSince = performance.now(); return; }
+  const sinceKey = (performance.now() - lastKey) / 1000;
+  const draft = $("say").value.trim().length > 0;
+  if (sinceKey < TYPING_HOLD_S || (draft && sinceKey < STALE_DRAFT_S)) { quietSince = performance.now(); return; }
+  if ((performance.now() - quietSince) / 1000 >= SILENCE_S) {
+    silentTurns++;
+    send({ silence: true });
+  }
+}
+setInterval(checkSilence, 500);
+window.__silence = () => ({ started, ended, awaitingReply, quietSince, silentTurns, nextTime, textClock, t: now(), speakingUntil });
 
 const keys = new Set();
 addEventListener("keydown", (e) => { if (document.activeElement !== $("say") || e.key.startsWith("Arrow")) keys.add(e.key.toLowerCase()); });
@@ -470,8 +518,11 @@ async function boot() {
   window.__game = { scene, chars, player, camera };   // for debugging in the console
 }
 
+let started = false, ended = false;
 $("knock").addEventListener("click", async () => {
   $("knock").disabled = true;
+  started = true;
+  awaitingReply = true;   // the opening is on its way
   audio = new AudioContext({ sampleRate: 24000 });
   connect();
   await fetch("/api/start", {
