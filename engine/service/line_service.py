@@ -51,6 +51,7 @@ OUT_SR = 22050
 # Beats whose "lines" are really the player's name or gender; a generated line just says the name.
 NAME_BEATS = {"player", "MALE", "FEMALE"}
 MIN_WORDS_TO_REWRITE = 3    # short reactions ("uh...", "ha ha!") keep their original performance
+DEADLINE_S = 5.5            # the bridge waits 6.5 s for a line; later than this we don't deliver
 
 
 def log(*a):
@@ -146,8 +147,11 @@ class Lines:
         ]
         limit = max(max_words(original) + 8, 18) if since else max_words(original)  # room to answer
         plain = re.sub(r"\s*\{name\}\s*,?", " ", original)
+        t0 = time.perf_counter()
         for attempt in range(3):
-            r = requests.post(LLM_URL, timeout=20, json={
+            if attempt and time.perf_counter() - t0 > 3.5:
+                break  # out of time: the original line plays
+            r = requests.post(LLM_URL, timeout=4, json={
                 "messages": prompt, "temperature": 0.7, "top_p": 0.9, "max_tokens": 90,
                 "chat_template_kwargs": {"enable_thinking": False},
             })
@@ -233,6 +237,11 @@ class Lines:
             if voiced is None:
                 return {"replace": False, "why": "voice off for this character"}
             audio, emotion = voiced
+        if time.perf_counter() - t0 > DEADLINE_S:
+            # The bridge has (almost) stopped waiting and played the original; writing files now
+            # would leave a stale line queued for the next time this script comes up.
+            log(f"{char} #{script} too slow ({time.perf_counter() - t0:.1f}s): dropped")
+            return {"replace": False, "why": "too slow"}
         file_no = self.perf[char][script].base_frame + 1
         wav_path = INJECT / f"{char}_{file_no}_{uuid.uuid4().hex[:8]}.wav"
         _write_wav(wav_path, audio)
@@ -260,7 +269,7 @@ class Lines:
             return text
         self.heard(text)
         recent = "\n".join(f"{who.upper()}: {t}" for who, t in self.memory[-6:-1])
-        r = requests.post(LLM_URL, timeout=10, json={
+        r = requests.post(LLM_URL, timeout=2.5, json={
             "messages": [
                 {"role": "system", "content": UNDERSTAND_PROMPT},
                 {"role": "user", "content": (f"Just before:\n{recent}\n\n" if recent else "") +

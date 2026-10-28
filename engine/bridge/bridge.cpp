@@ -64,6 +64,7 @@ static void logf(const char *fmt, ...) {
 
 static void engine_attach();
 static void autopilot_attach(HMODULE eng);
+static void scroll_text_box(HMODULE eng);
 // inject.cpp: generated lines
 static int generated_line(int ch, int s1, int s2, int s3, int s4);
 static void report_heard(const char *text);
@@ -147,20 +148,60 @@ static void engine_attach() {
     autopilot_attach(eng);  // only does anything in automated test runs
     inject_attach();
 
-    // Longer input: the text box cuts typing off where it reaches the box's right edge
-    // (animEngineDLL+0x9c9bf: "je keep_char" before the truncation). Make that jump unconditional,
-    // so typing continues up to the 255-character buffer the engine already has.
-    BYTE *jcc = (BYTE *)eng + 0x9c9bf;
-    if (jcc[0] == 0x74 && jcc[1] == 0x2e) {
-        DWORD old;
-        VirtualProtect(jcc, 1, PAGE_EXECUTE_READWRITE, &old);
-        jcc[0] = 0xEB;
-        VirtualProtect(jcc, 1, old, &old);
-        FlushInstructionCache(GetCurrentProcess(), jcc, 1);
-        logf("engine: text input no longer cut off at the box edge (up to 255 characters)");
+    scroll_text_box(eng);
+}
+
+// ---- longer input: a text box that scrolls instead of cutting typing off ----
+// Every frame the engine copies the typed text (obj+0x13e1c) into a display buffer (obj+0x1401c)
+// with strcpy (call at +0x9c8cd), lays it out, and where it reaches the box's right edge truncates
+// both buffers (+0x9c9c9 display, +0x9c9d9 typed text) and beeps (+0x9c9e0). We keep the display
+// truncation, drop the typed-text truncation and the beep, and copy only the end of long text.
+static int g_box_fits;      // characters that fit, learned from where the layout cut the display
+static int g_box_copied;    // length we copied last frame
+
+static char *__cdecl copy_tail(char *dst, const char *src) {
+    int shown = (int)strlen(dst);  // last frame's display after the engine's layout cut it
+    if (g_box_copied > shown && shown > 4) g_box_fits = shown;
+    int n = (int)strlen(src);
+    if (g_box_fits && n > g_box_fits) {
+        strcpy(dst, "...");
+        strcat(dst, src + n - (g_box_fits - 3));
     } else {
-        logf("engine: unexpected bytes at the text-width check; input length unchanged");
+        strcpy(dst, src);
     }
+    g_box_copied = (int)strlen(dst);
+    return dst;
+}
+
+static bool patch_bytes(BYTE *at, const BYTE *expect, const BYTE *repl, int n) {
+    if (memcmp(at, expect, n) != 0) return false;
+    DWORD old;
+    VirtualProtect(at, n, PAGE_EXECUTE_READWRITE, &old);
+    memcpy(at, repl, n);
+    VirtualProtect(at, n, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), at, n);
+    return true;
+}
+
+static void scroll_text_box(HMODULE eng) {
+    BYTE *b = (BYTE *)eng;
+    static const BYTE cut_typed[] = {0xC6, 0x81, 0x1C, 0x3E, 0x01, 0x00, 0x00};  // mov byte [ecx+0x13e1c], 0
+    static const BYTE beep[] = {0x6A, 0x1D, 0xE8};                              // push 0x1d; call ...
+    static const BYTE nops[10] = {0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90};
+    BYTE *call = b + 0x9c8cd;
+    bool ok = call[0] == 0xE8 && memcmp(b + 0x9c9d9, cut_typed, 7) == 0 && memcmp(b + 0x9c9e0, beep, 3) == 0 &&
+              b[0x9c9e7] == 0x83 && b[0x9c9e8] == 0xC4 && b[0x9c9e9] == 0x04;
+    if (!ok) { logf("engine: text box code not as expected; input length unchanged"); return; }
+    patch_bytes(b + 0x9c9d9, cut_typed, nops, 7);         // keep everything typed
+    BYTE beep_now[10];
+    memcpy(beep_now, b + 0x9c9e0, 10);
+    patch_bytes(b + 0x9c9e0, beep_now, nops, 10);         // no "box full" beep
+    BYTE rel[5] = {0xE8};
+    *(INT32 *)(rel + 1) = (INT32)((BYTE *)copy_tail - (call + 5));
+    BYTE was[5];
+    memcpy(was, call, 5);
+    patch_bytes(call, was, rel, 5);                       // show the end of long text
+    logf("engine: text box scrolls; typing up to 255 characters");
 }
 
 // --- memory scan: where does the engine keep line 1055 (Trip, "Where are the new wine glasses?")?

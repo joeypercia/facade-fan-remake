@@ -98,7 +98,7 @@ static int generated_line(int ch, int s1, int s2, int s3, int s4) {
     _snprintf(body, sizeof body, "{\"char\":%d,\"scripts\":[%d,%d,%d,%d]}", ch, s1, s2, s3, s4);
     std::string reply;
     DWORD t0 = GetTickCount();
-    if (!http_post(L"/line", body, reply, 12000)) return -1;  // service not running: play originals
+    if (!http_post(L"/line", body, reply, 6500)) return -1;  // service down or overloaded: originals
     if (reply.find("\"replace\": true") == std::string::npos) {
         logf("line service: keep original [%d,%d,%d,%d] (%lu ms) %s", s1, s2, s3, s4, GetTickCount() - t0, reply.c_str());
         return -1;
