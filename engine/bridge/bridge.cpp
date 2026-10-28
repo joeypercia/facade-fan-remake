@@ -61,6 +61,8 @@ static void logf(const char *fmt, ...) {
     LeaveCriticalSection(&g_lock);
 }
 
+static void engine_attach();
+
 BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         g_self = h;
@@ -69,9 +71,184 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
         GetModuleFileNameA(NULL, exe, MAX_PATH);
         const char *base = strrchr(exe, '\\');
         base = base ? base + 1 : exe;
-        _snprintf(g_proc, sizeof g_proc, "%s", _strnicmp(base, "java", 4) == 0 ? "java" : "engine");
+        bool java = _strnicmp(base, "java", 4) == 0;
+        _snprintf(g_proc, sizeof g_proc, "%s", java ? "java" : "engine");
+        if (!java) engine_attach();
     }
     return TRUE;
+}
+
+// ======================= engine process: observe file loads, find the script table ===========
+
+// Swap one entry of a module's import table. Returns the previous target, or NULL.
+static void *patch_iat(HMODULE mod, const char *dll, const char *fn, void *repl) {
+    BYTE *base = (BYTE *)mod;
+    IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew);
+    IMAGE_DATA_DIRECTORY dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    for (IMAGE_IMPORT_DESCRIPTOR *d = (IMAGE_IMPORT_DESCRIPTOR *)(base + dir.VirtualAddress); d->Name; d++) {
+        if (_stricmp((char *)(base + d->Name), dll) != 0) continue;
+        IMAGE_THUNK_DATA *names = (IMAGE_THUNK_DATA *)(base + d->OriginalFirstThunk);
+        IMAGE_THUNK_DATA *slots = (IMAGE_THUNK_DATA *)(base + d->FirstThunk);
+        for (; names->u1.AddressOfData; names++, slots++) {
+            if (IMAGE_SNAP_BY_ORDINAL(names->u1.Ordinal)) continue;
+            IMAGE_IMPORT_BY_NAME *ibn = (IMAGE_IMPORT_BY_NAME *)(base + names->u1.AddressOfData);
+            if (strcmp((char *)ibn->Name, fn) != 0) continue;
+            DWORD old;
+            VirtualProtect(&slots->u1.Function, sizeof(void *), PAGE_READWRITE, &old);
+            void *prev = (void *)slots->u1.Function;
+            slots->u1.Function = (ULONG_PTR)repl;
+            VirtualProtect(&slots->u1.Function, sizeof(void *), old, &old);
+            return prev;
+        }
+    }
+    return NULL;
+}
+
+typedef void *(WINAPI *MmioOpenA)(LPSTR, void *, DWORD);
+typedef HANDLE(WINAPI *CreateFileAFn)(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
+static MmioOpenA real_mmioOpenA;
+static CreateFileAFn real_CreateFileA;
+
+static void *WINAPI hook_mmioOpenA(LPSTR name, void *info, DWORD flags) {
+    void *h = real_mmioOpenA(name, info, flags);
+    logf("mmioOpenA \"%s\" flags=0x%lx -> %p", name ? name : "(null)", flags, h);
+    return h;
+}
+static HANDLE WINAPI hook_CreateFileA(LPCSTR name, DWORD access, DWORD share, LPSECURITY_ATTRIBUTES sa, DWORD disp,
+                                      DWORD attrs, HANDLE tmpl) {
+    HANDLE h = real_CreateFileA(name, access, share, sa, disp, attrs, tmpl);
+    logf("CreateFileA \"%s\" access=0x%lx", name ? name : "(null)", access);
+    return h;
+}
+
+static void engine_attach() {
+    // The engine DLL imports this bridge, so by the time we initialise its imports are bound.
+    HMODULE eng = GetModuleHandleA("animEngineDLL.dll");
+    if (!eng) { logf("engine: animEngineDLL.dll not loaded yet"); return; }
+    real_mmioOpenA = (MmioOpenA)patch_iat(eng, "WINMM.dll", "mmioOpenA", (void *)hook_mmioOpenA);
+    real_CreateFileA = (CreateFileAFn)patch_iat(eng, "KERNEL32.dll", "CreateFileA", (void *)hook_CreateFileA);
+    logf("engine: hooks mmioOpenA=%s CreateFileA=%s", real_mmioOpenA ? "on" : "MISSING",
+         real_CreateFileA ? "on" : "MISSING");
+}
+
+// --- memory scan: where does the engine keep line 1055 (Trip, "Where are the new wine glasses?")?
+
+struct Pattern { const char *name; BYTE bytes[64]; int len; };
+
+static int put32(BYTE *p, const int *v, int n) { memcpy(p, v, n * 4); return n * 4; }
+
+static void build_patterns(Pattern *ps, int *count) {
+    static const int record[] = {199998, 1055, 0, 0, 0, 200000, 200005, 752};
+    static const int phon[] = {70, 35, 38, 44, 31, 44, 49, 39, 55, 36};
+    static const char text[] = "Where are the new wine glasses";
+    int n = 0;
+    ps[n].name = "record-int32"; ps[n].len = put32(ps[n].bytes, record, 8); n++;
+    ps[n].name = "phonemes-int32"; ps[n].len = put32(ps[n].bytes, phon, 10); n++;
+    ps[n].name = "phonemes-int16";
+    for (int i = 0; i < 10; i++) ((short *)ps[n].bytes)[i] = (short)phon[i];
+    ps[n].len = 20; n++;
+    ps[n].name = "phonemes-int8";
+    for (int i = 0; i < 10; i++) ps[n].bytes[i] = (BYTE)phon[i];
+    ps[n].len = 10; n++;
+    ps[n].name = "text-ascii"; ps[n].len = (int)strlen(text); memcpy(ps[n].bytes, text, ps[n].len); n++;
+    ps[n].name = "text-int32";
+    for (int i = 0; i < 14; i++) ((int *)ps[n].bytes)[i] = text[i];
+    ps[n].len = 56; n++;
+    *count = n;
+}
+
+static const char *region_owner(void *addr, char *buf, int size) {
+    HMODULE m = NULL;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCSTR)addr, &m) && m) {
+        GetModuleFileNameA(m, buf, size);
+        const char *s = strrchr(buf, '\\');
+        return s ? s + 1 : buf;
+    }
+    return "heap/other";
+}
+
+// Visit every committed, readable region, except this DLL and the scanning thread's stack
+// (both hold copies of the search patterns). SEH guards against pages that vanish mid-scan.
+template <typename F> static void each_region(F f) {
+    MEMORY_BASIC_INFORMATION mbi, me;
+    VirtualQuery(&mbi, &me, sizeof me);  // our stack's allocation
+    void *skip_stack = me.AllocationBase;
+    for (BYTE *p = 0; VirtualQuery(p, &mbi, sizeof mbi) == sizeof mbi; p = (BYTE *)mbi.BaseAddress + mbi.RegionSize) {
+        DWORD prot = mbi.Protect & 0xff;
+        bool readable = mbi.State == MEM_COMMIT && !(mbi.Protect & PAGE_GUARD) &&
+                        (prot == PAGE_READONLY || prot == PAGE_READWRITE || prot == PAGE_WRITECOPY ||
+                         prot == PAGE_EXECUTE_READ || prot == PAGE_EXECUTE_READWRITE);
+        bool ours = mbi.AllocationBase == (void *)g_self || mbi.AllocationBase == skip_stack;
+        if (readable && !ours) f((BYTE *)mbi.BaseAddress, mbi.RegionSize);
+        if ((ULONG_PTR)mbi.BaseAddress + mbi.RegionSize >= 0x7fff0000) break;
+    }
+}
+
+static int find_all(BYTE *base, SIZE_T size, const BYTE *pat, int len, BYTE **out, int max) {
+    int n = 0;
+    __try {
+        for (SIZE_T i = 0; i + len <= size && n < max; i++)
+            if (base[i] == pat[0] && memcmp(base + i, pat, len) == 0) out[n++] = base + i;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return n;
+}
+
+static void dump_words(const char *label, BYTE *at) {
+    __try {
+        int *w = (int *)at;
+        logf("  %s %p: %d %d %d %d %d %d %d %d | %d %d %d %d %d %d %d %d", label, at, w[0], w[1], w[2], w[3], w[4],
+             w[5], w[6], w[7], w[8], w[9], w[10], w[11], w[12], w[13], w[14], w[15]);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+static DWORD WINAPI scan_thread(LPVOID) {
+    Pattern ps[8];
+    int np;
+    build_patterns(ps, &np);
+    logf("scan: start");
+    BYTE *hits[64];
+    int nhits = 0;
+    for (int k = 0; k < np; k++) {
+        int found = 0;
+        each_region([&](BYTE *b, SIZE_T s) {
+            BYTE *h[16];
+            int n = find_all(b, s, ps[k].bytes, ps[k].len, h, 16);
+            for (int i = 0; i < n && found < 16; i++, found++) {
+                char mod[MAX_PATH];
+                MEMORY_BASIC_INFORMATION mbi;
+                VirtualQuery(h[i], &mbi, sizeof mbi);
+                logf("scan: %s at %p (region %p+%lx, alloc %p, %s)", ps[k].name, h[i], mbi.BaseAddress,
+                     (unsigned long)mbi.RegionSize, mbi.AllocationBase, region_owner(h[i], mod, sizeof mod));
+                dump_words("words", h[i]);
+                if (nhits < 64) hits[nhits++] = h[i];
+            }
+        });
+        if (!found) logf("scan: %s not found", ps[k].name);
+    }
+    // Who points at (or just before) each hit? Pointer tables indexed by script number show up here.
+    for (int i = 0; i < nhits; i++) {
+        int refs = 0;
+        each_region([&](BYTE *b, SIZE_T s) {
+            __try {
+                for (SIZE_T j = 0; j + 4 <= s && refs < 8; j += 4) {
+                    ULONG_PTR v = *(ULONG_PTR *)(b + j);
+                    if (v <= (ULONG_PTR)hits[i] && (ULONG_PTR)hits[i] - v < 64) {
+                        logf("scan: ref to hit %p (-%lu) from %p", hits[i], (unsigned long)((ULONG_PTR)hits[i] - v), b + j);
+                        dump_words("around ref", b + j - 32);
+                        refs++;
+                    }
+                }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        });
+    }
+    logf("scan: done");
+    return 0;
+}
+
+static void scan_once() {
+    static LONG started = 0;
+    if (InterlockedExchange(&started, 1) == 0) CloseHandle(CreateThread(NULL, 0, scan_thread, NULL, 0, NULL));
 }
 
 #define JNI_NAME(n) "_Java_facade_nativeinterface_NativeAnimationInterface_" #n
@@ -173,6 +350,7 @@ __declspec(dllexport) bool AblCallbackAPI_PlayerEnteredText(char *const text) {
 }
 __declspec(dllexport) bool AblCallbackAPI_ScriptFinished(int ch, int script) {
     logf("ScriptFinished ch=%d script=%d", ch, script);
+    scan_once();  // by now the engine has loaded and played at least one line
     static bool(*f)(int, int) = (bool (*)(int, int))orig("?AblCallbackAPI_ScriptFinished@@YA_NHH@Z");
     return f(ch, script);
 }
