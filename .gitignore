@@ -21,3 +21,6 @@ __pycache__/
 *.pyc
 .venv/
 .env
+
+# Build output
+engine/bridge/out/
