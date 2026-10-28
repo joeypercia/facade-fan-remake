@@ -62,6 +62,7 @@ static void logf(const char *fmt, ...) {
 }
 
 static void engine_attach();
+static void autopilot_attach(HMODULE eng);
 
 BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
@@ -109,8 +110,11 @@ typedef HANDLE(WINAPI *CreateFileAFn)(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTE
 static MmioOpenA real_mmioOpenA;
 static CreateFileAFn real_CreateFileA;
 
+static void note_open(const char *name);
+
 static void *WINAPI hook_mmioOpenA(LPSTR name, void *info, DWORD flags) {
     void *h = real_mmioOpenA(name, info, flags);
+    note_open(name);
     logf("mmioOpenA \"%s\" flags=0x%lx -> %p", name ? name : "(null)", flags, h);
     return h;
 }
@@ -129,6 +133,7 @@ static void engine_attach() {
     real_CreateFileA = (CreateFileAFn)patch_iat(eng, "KERNEL32.dll", "CreateFileA", (void *)hook_CreateFileA);
     logf("engine: hooks mmioOpenA=%s CreateFileA=%s", real_mmioOpenA ? "on" : "MISSING",
          real_CreateFileA ? "on" : "MISSING");
+    autopilot_attach(eng);  // only does anything in automated test runs
 }
 
 // --- memory scan: where does the engine keep line 1055 (Trip, "Where are the new wine glasses?")?
@@ -354,3 +359,5 @@ __declspec(dllexport) bool AblCallbackAPI_ScriptFinished(int ch, int script) {
     static bool(*f)(int, int) = (bool (*)(int, int))orig("?AblCallbackAPI_ScriptFinished@@YA_NHH@Z");
     return f(ch, script);
 }
+
+#include "autopilot.cpp"

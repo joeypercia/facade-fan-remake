@@ -1,0 +1,13 @@
+# Autopilot script: <when> <action> [args]. <when> is seconds after start, or @anchor+seconds:
+# after the engine first opens a file containing "anchor". See engine/bridge/autopilot.cpp.
+# Start-up: loading, title with intro music (tr_intro_* cues, ends with tr_intro_end), then
+# "Please Choose a Name": type the first letter, scroll with the arrow keys, Enter to begin.
+0 shots 6
+@tr_intro_end+12 shot
+@tr_intro_end+14 key J 0.2
+@tr_intro_end+16 shot
+@tr_intro_end+18 key RETURN 0.2
+@tr_intro_end+24 shot
+@tr_intro_end+30 key UP 3.0
+@tr_intro_end+34 key UP 3.0
+@tr_intro_end+40 shot
