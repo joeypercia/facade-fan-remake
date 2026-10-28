@@ -102,8 +102,16 @@ Measured 2026-10-27 with `engine/service/measure_vram.py`, each piece alone:
 
 Façade and everyday desktop apps (browser, chat, audio tools) take another 1-2 GB, so at ~10 GB the card
 was full: Windows spilled GPU memory into system RAM and every LLM call timed out (the "delays, no
-answers" session). The cheaper settings leave ~3.5-4 GB of headroom. If that's not enough, Qwen3-4B
-(~2.5 GB download) would bring the total to ~4.5 GB at the cost of weaker writing.
+answers" session). If the cheaper settings aren't enough, Qwen3-4B (~2.5 GB download) would bring the
+total to ~4.5 GB at the cost of weaker writing.
+
+**Applied, measured with the whole stack running** (LLM server plus `check_service.py` and
+`check_tone.py` generating and voicing lines): peak **+7.1 GB** over the desktop, with the LLM at 5.0 GB.
+`engine/service/measure_voice_steps.py` breaks down the voice side. The first fp16 attempt still peaked
+at 9.1 GB: the model had gradients enabled, so each of the 12 stored voice conditionings kept its
+autograd history (~1.6 GB in all). `load_fp16` now turns gradients off and runs under
+`torch.inference_mode`, and the 12 voices cost almost nothing. Lines took 1.3-2.8 s, and tone matching
+was unchanged (offscreen loudness 0.017 vs. the original take's 0.018).
 
 ## Unknowns
 
