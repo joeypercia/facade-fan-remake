@@ -43,6 +43,32 @@ Voice files are read through one call site of `mmioOpenA` in `animEngineDLL.dll`
 and played with DirectSound. Lip-sync and cue tracks come from `<char>Script.sbinary`, loaded into
 the engine process at startup (format in [ASSETS.md](ASSETS.md)).
 
+## Observed in a real session (step 1, bridge log)
+
+A 4-minute session with the observe-only bridge (991 calls) showed:
+
+- **Dialogue is `pushMultipleAnimationScripts(char, s1, s2, s3, s4, layer=7)`.** Layer 7 is speech.
+  `pushAnimationUScript` was never called. A spoken line is up to four script indices played
+  back to back. This is how the original fits the player's name into a sentence: Trip's
+  "Oh, / *Player,* / take a look at this photo…" is `[1473, 306, 1474]`, where 306 is one of the
+  per-name recordings (or a generic one for names it doesn't know). Generated lines can simply
+  say the player's real name.
+- Indices with no catalog entry on layer 7 (171-175, 271, 297…) are short non-dialogue scripts
+  (reactions, breaths).
+- **`ScriptFinished(char, x)` reports the layer, not the script** (always 7 here). It arrives when
+  the audio ends (1-6 s after the push), and the drama manager waits for it before the next line.
+  A replacement line therefore has to really play for its own length, and its end is reported by
+  the engine as usual.
+- **Typed text arrives twice:** the engine calls `PlayerEnteredText(text)` when Enter is pressed,
+  and the Java side reads the same text through `textSensor()` a few ms later. `" "` arrives
+  when the player starts typing (the characters react to "about to speak"), and `"warm up nlu"`
+  is an internal warm-up of the original parser.
+- Mouse actions (hug, kiss) reach the drama manager through `getPlayerGesture`, not text.
+- `doFullExpressionMoodAnimation` is re-issued every ~0.5 s (583 calls); `setGazeTracking`,
+  `walkStep`, `doGestureAnimation` and `miscLittleAction` are called dozens of times a minute by
+  the low-level behaviours. The LLM's performance choices must coexist with these.
+- `music(0, n)` switches the soundtrack cue as tension rises.
+
 ## Plan
 
 1. **Proxy bridge (observe).** A 32-bit `nativeaniminterface.dll` proxy that forwards every JNI
