@@ -198,6 +198,10 @@ static void apply_job(const std::string &dir, const std::string &name) {
     int *rec = (int *)VirtualAlloc(NULL, size + 64, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     ReadFile(f, rec, size, &got, NULL);
     CloseHandle(f);
+    // The engine counts a record's alternative performances by scanning forward to the next
+    // record's start marker (animEngineDLL+0x16376), so ours must be followed by one, as in the file.
+    rec[got / 4] = 199998;
+    rec[got / 4 + 1] = 199999;
     DeleteFileA((stem + ".tok").c_str());
     EnterCriticalSection(&g_inject_lock);
     int **slot = &t.slots[it->second];

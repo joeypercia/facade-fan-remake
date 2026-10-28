@@ -271,18 +271,30 @@ def _write_wav(path, audio):
 
 
 LINES = None
-_warm = threading.local()
+JOBS = None  # generation runs on one long-lived thread: PyTorch sets up CUDA per thread (~2 s each)
+
+
+def worker():
+    import queue as _q
+    LINES.voices.warm_thread()
+    while True:
+        args, reply = JOBS.get()
+        try:
+            reply.put(LINES.line(*args))
+        except Exception as e:
+            log(f"error: {e!r}")
+            reply.put({"replace": False, "why": repr(e)})
 
 
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
+        import queue as _q
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
         try:
             if self.path == "/line":
-                if not getattr(_warm, "done", False):  # PyTorch sets up CUDA per thread
-                    LINES.voices.warm_thread()
-                    _warm.done = True
-                out = LINES.line(int(body.get("char", -1)), [int(s) for s in body.get("scripts", [])])
+                reply = _q.Queue()
+                JOBS.put(((int(body.get("char", -1)), [int(s) for s in body.get("scripts", [])]), reply))
+                out = reply.get()
             elif self.path == "/heard":
                 LINES.heard(body.get("text", ""))
                 out = {"ok": True}
@@ -304,9 +316,12 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global LINES
+    global LINES, JOBS
+    import queue
     log("loading voices and lines...")
     LINES = Lines()
+    JOBS = queue.Queue()
+    threading.Thread(target=worker, daemon=True).start()
     log(f"ready on 127.0.0.1:{PORT}. Start Façade now.")
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
 
