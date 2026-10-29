@@ -123,6 +123,21 @@ With each generated line, the line service also asks the LLM how it's performed
   manager's staging (where each character stands for each beat), and its walk behaviours would
   immediately walk them back. They need a hook into the staging, not just the calls above.
 
+## Story lines: as written, with an answer first (revised 2026-10-29)
+
+Rewording every drama-manager line made the dialogue drift into nonsense: "Well come on in..."
+became "Well come on in, you're freezing", and fragments of a sentence the drama manager plays
+across several lines ("You think I'm...") got invented endings ("...a failure?"). Now:
+
+- A story line plays as written, in the actor's own take, unless the guest has said something no
+  line has answered yet (within 25 s), or a scene just ended.
+- Then the character first says a short generated reply (at most 12 words: answer the question,
+  return the greeting, or dodge in character), and the whole line, reply plus the original words, is
+  voiced anew. The reply is checked against echoing the line, repeating earlier lines, and meta talk.
+- Fragments and bare reactions ("Uh...", "get divorced...") always play as written; the guest's
+  words then wait for the next whole line.
+- The parser restatement no longer adds meaning ("umm what" stays "What?").
+
 ## Off-script scenes and following (built 2026-10-28)
 
 Façade's drama manager has no room for a guest who takes the evening somewhere new. It deflects what
@@ -160,9 +175,14 @@ out. Nobody ever follows the guest.
 - **Positions** (`engine/bridge/world.cpp`). Every line request carries everyone's floor position
   (`getObjectPosition`). The service describes where the guest is: by the bar, in the hallway, next
   to the speaker.
-- **Following.** Once the guest has come in (seen in the hallway, then well inside for 3 s), the
-  nearer host walks after them whenever they are more than 170 units from both hosts. The host
-  stops 70 units short. The same `walkStep` is re-issued every 0.5 s, as the drama manager does.
+- **Following, only when asked** (revised after the 10-29 play test: hosts trailing the guest
+  unasked felt wrong). `/understand` also asks the LLM whether the guest's words ask a host to come
+  along ("follow me", "trip, come out here", "can I talk to you in private"); a keyword pre-check
+  keeps the call off ordinary lines. Its answer rides back as `"follow"`: 0 Grace, 1 Trip, 2
+  whoever is nearer, -1 "stay there". Only that host follows, for 3 minutes or until told to stay.
+- Once asked and once the guest has come in (seen in the hallway, then well inside for 3 s), the
+  host walks after them whenever they are more than 170 units away. The host stops 70 units short.
+  The same `walkStep` is re-issued every 0.5 s, as the drama manager does.
   - Following only starts when that host's last walk from the drama manager has completed (its
     `Walk` action's `completionStatus`).
   - Replacing a walk the drama manager was still waiting on killed its Java process in testing.

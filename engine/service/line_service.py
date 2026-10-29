@@ -1,4 +1,7 @@
-"""Line service: new words, voice and lip sync for each line the original drama manager chooses.
+"""Line service: answers, voice and lip sync for the lines the original drama manager chooses.
+
+A story line plays as written (the actor's own take) unless the guest has said something it should
+answer: then the character says a few generated words first and the whole line is voiced anew.
 
 The bridge (in the game's Java process) calls this for every line before it plays:
 
@@ -53,8 +56,8 @@ CHARS = {0: "grace", 1: "trip"}
 OUT_SR = 22050
 # Beats whose "lines" are really the player's name or gender; a generated line just says the name.
 NAME_BEATS = {"player", "MALE", "FEMALE"}
-MIN_WORDS_TO_REWRITE = 3    # short reactions ("uh...", "ha ha!") keep their original performance
 DEADLINE_S = 5.5            # the bridge waits 6.5 s for a line; later than this we don't deliver
+UNANSWERED_S = 25           # the guest's words still want an answer for this long
 
 
 def log(*a):
@@ -68,6 +71,8 @@ class Lines:
         self.raw = {c: ff.read_records_raw(FACADE, c) for c in CHARS.values()}
         self.perf = {c: ff.read_sbinary(FACADE, c) for c in CHARS.values()}
         self.memory = []      # tonight: ("guest"|"grace"|"trip", text)
+        self.unanswered = []  # (time, words) the guest said that no line has answered yet
+        self.leads = []       # tonight's lead-ins (lead_in), so none comes back
         self.player_name = None
         self.scene = None     # an off-script scene in progress (improv.Scene): the story is paused
         self.ending = None    # the scene that just ended: the next story line bridges from it
@@ -75,7 +80,7 @@ class Lines:
         self.where = {}       # everyone's position, as of the last request
         self.ended_at = 0.0   # when the last scene ended
         self.hall_done = False  # this trip out to the hallway has had its scene
-        self.lines_kind = "story"
+        self.lines_kind = "answer"
         # Scene lines need a record to ride on: an ordinary onscreen line per character (its slot is
         # only borrowed while the story is paused, so the drama manager can't want it meanwhile).
         self.template = {c: self.pick_template(c) for c in CHARS.values()}
@@ -84,9 +89,10 @@ class Lines:
         self.voices = Voices(self.catalog, mute=True)
         self.voices.load()
         self.voices.warm_thread()  # this thread; request threads warm themselves on first use
-        # Warm the LLM with a real rewrite (same system prompt, so it's cached): the first line of
+        # Warm the LLM with a real lead-in (same system prompt, so it's cached): the first answer of
         # the evening otherwise pays several seconds of setup mid-scene.
-        self.write_words("trip", self.by_id[("trip", 1055)], self.by_id[("trip", 1055)]["text"])
+        warm = self.by_id[("trip", 1074)]
+        self.lead_in("trip", warm, warm["text"], ["hi!"], None)
         INJECT.mkdir(parents=True, exist_ok=True)
         for f in INJECT.iterdir():
             f.unlink(missing_ok=True)
@@ -124,90 +130,73 @@ class Lines:
         return primary, " ".join(parts).replace(" ,", ",")
 
     def guest_since(self, char, line):
-        """What the guest has said since this character last spoke (their line should answer it),
-        unless they can't hear the guest (the argument behind the door, other offscreen lines)."""
+        """What the guest has said that no line has answered yet (the next line should), unless this
+        character can't hear the guest (the argument behind the door, other offscreen lines). Words
+        older than UNANSWERED_S have been overtaken by the conversation and are dropped."""
         if {"OFFSCREEN", "MUTED"} & set(line["direction"]) or line["beat"].startswith("PBEHINDDOOR"):
             return []
-        since = []
-        for who, t in reversed(self.memory):
-            if who == char:
-                break
-            if who == "guest":
-                since.insert(0, t)
-        return since
+        self.unanswered = [(t, w) for t, w in self.unanswered if time.time() - t < UNANSWERED_S]
+        return [w for _, w in self.unanswered]
 
-    def write_words(self, char, line, original, where=None):
-        where = where or {}
-        place = improv.describe(where, char)
-        bridge, self.ending = self.ending, None
-        self.lines_kind = "return" if bridge else "story"
-        name = self.player_name
-        if name:
-            original = original.replace("{name}", name)
-            name_rule = f"The guest is called {name}."
-        else:  # the generic "Player" fragment: the original doesn't know the name either
-            original = re.sub(r"\s*\{name\}\s*,?", " ", original).strip()
-            name_rule = "You don't know the guest's name: never use a name for them."
-        direction = " ".join(w.lower() for w in line["direction"]) or "natural"
-        recent = "\n".join(f"{who.upper()}: {t}" for who, t in self.memory[-14:])
-        since = self.guest_since(char, line)
-        answer = (f"The guest just said: \"{' / '.join(since[-3:])}\". {char.capitalize()} hears it: respond to "
-                  f"it naturally (acknowledge it, answer if it's a question) while still doing what the "
-                  f"director's line does.\n") if since else ""
+    def lead_in(self, char, line, original, since, bridge):
+        """A few words for the character to say before the drama manager's own line, so it fits what
+        was just said: an answer to the guest's words, or a way back from a scene. "" when the line
+        already does that (or nothing fits): then the line plays as written."""
+        place = improv.describe(self.where, char)
+        name_rule = (f"The guest is called {self.player_name}." if self.player_name else
+                     "You don't know the guest's name: never use a name for them.")
+        recent = "\n".join(f"{who.upper()}: {t}" for who, t in self.memory[-12:])
+        Char = char.capitalize()
+        task = f"In a moment {Char} will say this line from the play: \"{original}\"\nBut first, "
+        if since:
+            task += f"{Char} replies to what the guest just said: \"{' / '.join(since[-3:])}\"."
         if bridge:
-            answer += (f"The conversation had wandered off to something else ({bridge.what}) and is now coming "
-                       f"back to the evening: open with a few words that close that off naturally, then say "
-                       f"the director's line.\n")
+            task += (f"{' And' if since else ''} {Char} closes off what the conversation had wandered into "
+                     f"({bridge.what}), coming back to the evening.")
+        task += f"\nWrite only that reply (not the play's line): {Char}'s words, at most 12."
         prompt = [
             {"role": "system", "content": "\n\n".join([
-                SETTING, CHARACTERS["grace"], CHARACTERS["trip"],
-                name_rule,
-                "You write one line of dialogue at a time for a stage play. The play's director has "
-                "already decided who speaks next and what the line must do; you choose the exact words "
-                "so they fit what has actually been said tonight.",
-                "Rules: keep the same intent, emotion and length (within about a third) as the director's "
-                "line. Keep every concrete detail it mentions (objects, names, places, facts, questions): "
-                "the next lines of the play follow from them. Change the wording so it reacts to what the "
-                "guest actually said and to what was said before; don't just repeat the director's line. "
-                "Natural spoken English; no stage directions, no quotation marks, no speaker name. "
-                "Output only the line.",
+                SETTING, CHARACTERS["grace"], CHARACTERS["trip"], name_rule,
+                "You write a character's quick reply to what the guest just said. Right after it, the character "
+                "goes on with a line of the play (given to you), so the reply must lead naturally into that line "
+                "without contradicting it, repeating it or saying what it is about to say.",
+                "Rules: one short sentence, at most 12 words. Reply to the guest's actual words, as the "
+                "character would: answer a question (or dodge it, in character: Grace and Trip hide their "
+                "troubles from guests), return a greeting, acknowledge a remark. Take the guest's words at face "
+                "value: greetings and ordinary questions get ordinary, friendly replies, never shock or offence. "
+                "Stay consistent with the conversation and with where everyone is; never invent facts about "
+                "the guest, and no pets, visitors or events that aren't in the play. Natural spoken English; no "
+                "stage directions, no quotation marks, no speaker name. Don't reuse words from the play's line "
+                "or from earlier lines. Output only the reply.\n"
+                "Examples of the kind of reply (write your own, for this moment):\n"
+                "guest \"you guys ok?\", line \"So, can I get you a drink?\" -> \"Oh, we're great, totally fine.\"\n"
+                "guest \"what was that noise?\", line \"So, what do you think of the painting?\" -> \"Oh, that? "
+                "Nothing, just us being silly.\"",
             ])},
             {"role": "user", "content":
-                (f"Tonight so far:\n{recent}\n\n" if recent else "") + (place + "\n" if place else "") +
-                f"{char.upper()} speaks next ({direction}). The director's line: \"{original}\"\n" + answer +
-                (f"It must still mention: {', '.join(keys)}.\n" if (keys := key_words(original)) else "") +
-                f"At most {max_words(original) + (12 if bridge else 0)} words. Write {char.capitalize()}'s line in your own words, "
-                f"not the director's."},
+                (f"Tonight so far:\n{recent}\n\n" if recent else "") + (place + "\n" if place else "") + task},
         ]
-        limit = max(max_words(original) + 8, 18) if since else max_words(original)  # room to answer
-        if bridge:
-            limit += 12
-        plain = re.sub(r"\s*\{name\}\s*,?", " ", original)
-        t0 = time.perf_counter()
-        for attempt in range(3):
-            if attempt and time.perf_counter() - t0 > 3.5:
-                break  # out of time: the original line plays
-            r = requests.post(LLM_URL, timeout=4, json={
-                "messages": prompt, "temperature": 0.7, "top_p": 0.9, "max_tokens": 90,
+        for _ in range(2):
+            r = requests.post(LLM_URL, timeout=3, json={
+                "messages": prompt, "temperature": 0.4, "top_p": 0.9, "max_tokens": 40,
                 "chat_template_kwargs": {"enable_thinking": False},
             })
             r.raise_for_status()
             text = r.json()["choices"][0]["message"]["content"].strip()
             text = re.sub(r'^\s*(grace|trip)\s*[:|]\s*', "", text, flags=re.I).strip().strip('"').strip()
-            text = plain_ascii(text.splitlines()[0].strip()) if text else ""
-            kept = sum(k.lower() in text.lower() for k in keys) if text else 0
-            fits = text and len(text.split()) <= limit and kept * 2 >= len(keys)  # at least half the details
-            copied = text and same_words(text, plain, threshold=0.85)
-            if fits and not copied:
+            text = plain_ascii(re.sub(r"\*[^*]*\*|\([^)]*\)", " ", text.splitlines()[0])) if text else ""
+            if not text or re.fullmatch(r"\W*none\W*", text, re.I):
+                return ""
+            meta = bool(re.search(r"\b(here's|here is) (\w+'s )?(line|response)|\b(scene|script|director)\b",
+                                  text, re.I)) or text.lower().startswith(("sure,", "sure!", "certainly"))
+            echo = same_words(text, original, threshold=0.6)
+            repeat = any(same_words(text, t, threshold=0.8) for t in self.leads[-8:] + [t for _, t in self.memory[-10:]])
+            if len(text.split()) <= 18 and not meta and not echo and not repeat:
                 return text
-            prompt.append({"role": "assistant", "content": text})
-            prompt.append({"role": "user", "content":
-                           "That's the director's line almost word for word. Say it differently, in "
-                           f"{char.capitalize()}'s own words" + (" and respond to what the guest said" if since else "") +
-                           "." if copied else
-                           f"Too long or missing details. At most {limit} words, and mention: "
-                           f"{', '.join(keys) or 'the same things'}. Only the line."})
-        return ""  # couldn't get a faithful line: the original plays
+            prompt += [{"role": "assistant", "content": text},
+                       {"role": "user", "content": "That repeats something already said; reply with something new." if repeat
+                        else "Only the short reply (at most 12 words), not the line itself."}]
+        return ""
 
     def improvise(self, char, scene, guest_words):
         """A line inside an off-script scene (improv.Scene): answer the guest, keep it going."""
@@ -232,7 +221,8 @@ class Lines:
                 "see their old friend and want the evening to go well, so they're warm with the guest, even "
                 "teasing; any sharpness goes at each other, and Grace and Trip's own tensions can still show. "
                 "Don't steer back to earlier topics. Say plain, concrete things about what's happening right "
-                "now; no cryptic metaphors, and don't keep coming back to the same joke.",
+                "now; no cryptic metaphors, and don't keep coming back to the same joke. Take the guest's "
+                "words at face value: an ordinary question gets a straight answer, never shock or offence.",
                 "Stay consistent with the conversation and with where everyone physically is: never say you "
                 "are somewhere you aren't, never invent facts about the guest, and don't speak for "
                 f"{other.capitalize()} or the guest. Words in "
@@ -326,20 +316,33 @@ class Lines:
                 self.came_in = True
         if self.pause_story(char, line):
             return {"replace": False, "hold": True}
-        short = len(re.findall(r"[A-Za-z']+", original.replace("{name}", ""))) < MIN_WORDS_TO_REWRITE
-        if short and not self.guest_since(char, line) and not improv.moment(line["beat"]) and not self.scene:
-            # A short reaction with nothing to answer: the actor's own "uh..." is better.
-            self.memory.append((char, original.replace("{name}", self.player_name or "")))
-            return {"replace": False, "why": "short reaction"}
+        # The drama manager's lines are written for its beats; reworded, they drifted into nonsense
+        # ("Well come on in, you're freezing"). So a line plays as written, in the actor's own voice,
+        # unless there's something to answer first: then a few lead-in words go before it (lead_in)
+        # and the whole line is voiced. Fragments of a longer sentence ("You think we should...",
+        # "get divorced...") always play as written; the guest's words wait for the next whole line.
+        written = re.sub(r"\s+", " ", original.replace("{name}", self.player_name) if self.player_name else
+                         re.sub(r"\s*\{name\}\s*,?", " ", original)).strip()
+        since, bridge = self.guest_since(char, line), self.ending
+        if since and improv.addressed(since[-1]) not in (None, char):
+            since = []   # said to the other host: it waits for their line
+        if fragment(original) or not (since or bridge):
+            self.memory.append((char, written))
+            log(f"{char} #{script} {line['beat']} as written: {written}")
+            return {"replace": False, "why": "fragment" if fragment(original) else "nothing to answer"}
         with self.lock:   # one line at a time: the voice model isn't re-entrant
-            text = fit_subtitle(self.write_words(char, line, original, where))
-            if not text:
-                return {"replace": False, "why": "no words"}
-            plain = re.sub(r"\s*\{name\}\s*,?", " ", original)
-            if self.lines_kind == "story" and same_words(text, plain, threshold=0.85):  # (only if every retry still copied it)
-                # Essentially the original line: the actor's real performance beats a synthetic copy.
-                self.memory.append((char, plain.strip()))
-                return {"replace": False, "why": "same as original"}
+            first = self.lead_in(char, line, written, since, bridge)
+            self.ending = None
+            self.lines_kind = "return" if bridge else "answer"
+            text = f"{first} {written}" if first else ""
+            if first:
+                self.leads.append(first)
+            if not first or len(text) <= MAX_SUBTITLE:
+                self.unanswered = []   # answered now: by the lead-in, or by the line itself (NONE)
+            if not text or len(text) > MAX_SUBTITLE:   # (too long: the next line answers instead)
+                self.memory.append((char, written))
+                log(f"{char} #{script} {line['beat']} as written ({'it answers' if not first else 'no room'}): {written}")
+                return {"replace": False, "why": "line answers it" if not first else "too long with a lead-in"}
             t1 = time.perf_counter()
             # The acting (expression, gesture, gaze). Chosen before the voice renders, not alongside
             # it: sharing the GPU slowed both more than doing them one after the other.
@@ -360,7 +363,7 @@ class Lines:
         log(f"{char} #{script} {line['beat']} {self.lines_kind.upper()} [{emotion}] "
             f"{time.perf_counter() - t0:.2f}s (words {t1 - t0:.2f}s, "
             f"acting {t2 - t1:.2f}s)\n"
-            f"    was: {original}\n    now: {text}\n    acting: {pick or 'none chosen'}")
+            f"    answering: {' / '.join(since) or '-'}\n    now: {text}\n    acting: {pick or 'none chosen'}")
         return out
 
     def emit(self, char, script, text, audio, pick):
@@ -438,6 +441,7 @@ class Lines:
             if char not in free:
                 char = next(iter(free))
             s.inbox.clear()
+            self.unanswered = []   # the scene answers them, not the story's next line
         elif now - max(s.last_guest, s.last_line) > improv.QUIET_S:
             return self.end_scene("it went quiet")
         elif now - s.last_line > improv.CHIME_S and now - s.last_guest > improv.CHIME_S and s.chimes < improv.MAX_CHIMES:
@@ -467,18 +471,34 @@ class Lines:
         text = text.strip()
         if text and text != "warm up nlu":
             self.memory.append(("guest", text))
+            self.unanswered.append((time.time(), text))
             log(f"guest: {text}")
 
     def understand(self, text):
+        """What the player typed: (text for the drama manager, hide, follow).
+        Also asks, alongside, whether the guest wants someone to come along (follow: improv.follow_request)."""
+        text = text.strip()
+        if not text or text in (" ", "warm up nlu"):
+            return text, False, None
+        t0 = time.time()
+        self.heard(text)
+        recent = "\n".join(f"{who.upper()}: {t}" for who, t in self.memory[-6:-1])
+        follow = {}
+        asking = threading.Thread(target=lambda: follow.update(
+            who=improv.follow_request(text, recent, self.nearer_host())), daemon=True)
+        asking.start()
+        out, hide = self.restate(text, recent)
+        asking.join(timeout=max(0.0, 1.3 - (time.time() - t0)))   # the bridge waits 1.5 s in all
+        who = follow.get("who")
+        if who is not None:
+            log(f"    follow: {['stay', 'grace', 'trip', 'whoever is nearer'][who + 1]}")
+        return out, hide, who
+
+    def restate(self, text, recent):
         """Restate what the player typed in the plain phrasing Façade's 2005 parser recognizes, so the
         original drama manager picks the right reaction. The real words go to tonight's memory.
         Returns (text for the drama manager, hide): during a scene the scene answers instead, and the
         drama manager (paused) hears nothing."""
-        text = text.strip()
-        if not text or text in (" ", "warm up nlu"):
-            return text, False
-        self.heard(text)
-        recent = "\n".join(f"{who.upper()}: {t}" for who, t in self.memory[-6:-1])
         if self.came_in and improv.takes_it_somewhere_new(text, recent, self.scene):
             if self.scene:
                 self.scene.heard(text)
@@ -524,32 +544,18 @@ sentence (or two) that keeps the same meaning and makes their intent obvious, us
 - words in *asterisks* or (parentheses) are actions: say what the guest does or means ("*hugs Grace*" ->
   "I want to hug you, Grace."; "*sits on the couch*" -> "I'll sit down.").
 Fix spelling and slang ("hows it goin" -> "Hi! How are you?"). Keep names (Grace, Trip). If it's addressed to
-someone, keep who. Never add things the guest didn't mean. Output only the restated sentence."""
+someone, keep who; never add a name the guest didn't use. Never add things the guest didn't mean: confusion
+stays confusion ("umm what" -> "What?"; "huh?" -> "What?"), and a question stays the same question
+("what happened" -> "What happened?"). Output only the restated sentence."""
 
-STOPWORDS = set("""a an the and or but if so to of in on at for with from by about as into than then that this
-these those there here what when where which who whom why how is are was were be been being am do does did done
-have has had having i you he she it we they me him her us them my your his its our their mine yours just really
-very oh uh um well yeah yes no not don't can't won't i'm you're it's that's there's let's come go get got make
-made know think thought want like look see say said tell one some any all more much little lot way thing things
-tonight now again too also only even still back up out over right okay ok please god jesus trip grace""".split())
-
-
-def key_words(line):
-    """Concrete content words of the director's line that the rewrite must keep (at most three)."""
-    words = re.findall(r"[A-Za-z']+", re.sub(r"\{name\}", "", line))
-    keys = [w for w in words if len(w) >= 4 and w.lower() not in STOPWORDS]
-    # Prefer nouns-ish: keep order, drop duplicates, at most three.
-    seen, out = set(), []
-    for w in keys:
-        if w.lower() not in seen:
-            seen.add(w.lower())
-            out.append(w.lower())
-    return out[:3]
-
-
-def max_words(line):
-    n = len(re.findall(r"[A-Za-z']+", line))
-    return max(6, int(n * 1.35) + 2)
+def fragment(line):
+    """A piece of a sentence the drama manager plays across several lines ("You think we should....",
+    "get divorced...") or a bare reaction ("Uh...", "Ha ha!"): it can't take a lead-in."""
+    text = re.sub(r"\{name\}", "", line).strip()
+    words = re.findall(r"[A-Za-z']+", text)
+    if len(words) < 3 or text[:1].islower():
+        return True
+    return len(words) < 6 and bool(re.search(r"(\.\.\.|--|-)\s*$", text))
 
 
 MAX_SUBTITLE = 140  # longer subtitles overran the engine's buffer (garbage after ~150 characters)
@@ -662,8 +668,10 @@ class Handler(BaseHTTPRequestHandler):
                 LINES.heard(body.get("text", ""))
                 out = {"ok": True}
             elif self.path == "/understand":
-                text, hide = LINES.understand(body.get("text", ""))
+                text, hide, follow = LINES.understand(body.get("text", ""))
                 out = {"text": text, "hide": hide}
+                if follow is not None:
+                    out["follow"] = follow
             else:
                 self.send_error(404)
                 return

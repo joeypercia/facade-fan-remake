@@ -76,6 +76,7 @@ static int generated_line(int ch, int s1, int s2, int s3, int s4, const std::str
 static std::string world_json(JNIEnv *env);
 static void world_saw_walk(JNIEnv *env, int ch, jobject act);
 static void follow_tick(JNIEnv *env);
+static void follow_request(int who);
 static bool disguise_player(JNIEnv *env, float &x, float &z);
 static void java_log_init(JNIEnv *env);
 static void report_heard(const char *text);

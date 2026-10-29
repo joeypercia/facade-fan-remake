@@ -36,15 +36,28 @@ static bool world_pos(JNIEnv *env, int sprite, float &x, float &z) {
 
 // ---- following the guest ----
 // The drama manager stages Grace and Trip around the living room and never follows a guest who
-// wanders off. When the guest is well away from both and the drama manager isn't walking the nearer
-// one, we walk that one over (walkStep, re-issued every half second as the drama manager does),
-// stopping a conversation's distance short. Any walk of the drama manager's own wins: we back off.
-static const float kFollowFrom = 170;   // start following when the guest is this far from both
+// wanders off. Only when the guest asks someone to come along ("follow me", "come out here", from the
+// service's /understand) do we walk them after the guest (walkStep, re-issued every half second as
+// the drama manager does), stopping a conversation's distance short, until the guest tells them to
+// stay or kFollowFor runs out. Any walk of the drama manager's own wins: we back off.
+static const float kFollowFrom = 170;   // start following when the guest is this far away
 static const float kStopShort = 70;     // stop this far from the guest
 static const float kFollowFromHall = 100, kStopShortHall = 55;  // the same, with the guest in the hallway
+static const DWORD kFollowFor = 180000; // a request lasts this long (ms)
 static DWORD g_dm_walk[2];              // tick of the drama manager's last walkStep per character
 static jobject g_dm_walk_act[2];        // and its Walk action (global ref), to see when it's done
 static int g_following = -1;
+static volatile int g_follow_who = -1;  // who the guest asked: 0 Grace, 1 Trip, 2 whoever is nearer; -1 nobody
+static volatile DWORD g_follow_since;
+
+// From the service: who the guest asked to come along (0, 1, 2), or -1 (told to stay).
+static void follow_request(int who) {
+    if (who < -1 || who > 2) return;
+    g_follow_who = who;
+    g_follow_since = GetTickCount();
+    logf(who < 0 ? "follow: the guest told them to stay" : "follow: the guest asked %s to come along",
+         who == 0 ? "grace" : who == 1 ? "trip" : "whoever is nearer");
+}
 
 static void world_saw_walk(JNIEnv *env, int ch, jobject act) {
     if (ch != 0 && ch != 1) return;
@@ -115,10 +128,18 @@ static void follow_tick(JNIEnv *env) {
     if (!world_pos(env, 2, px, pz) || !world_pos(env, 0, c[0][0], c[0][1]) || !world_pos(env, 1, c[1][0], c[1][1]))
         return;
     check_came_in(env, px, pz);
-    if (!g_came_in) return;
+    if (g_follow_who >= 0 && now - g_follow_since > kFollowFor) {
+        logf("follow: the guest's request has run out");
+        g_follow_who = -1;
+    }
+    if (!g_came_in || g_follow_who < 0) {
+        if (g_following >= 0) logf("follow: %s stops (not asked any more)", g_following ? "trip" : "grace");
+        g_following = -1;
+        return;
+    }
     float d[2];
     for (int k = 0; k < 2; k++) d[k] = hypotf(c[k][0] - px, c[k][1] - pz);
-    int ch = d[0] < d[1] ? 0 : 1;
+    int ch = g_follow_who == 2 ? (d[0] < d[1] ? 0 : 1) : g_follow_who;
     bool busy = dm_walking(env, ch);
     // Out in the hallway a conversation happens closer, and on the other side of the door frame.
     bool hall = past_door(px, pz) < -20;

@@ -104,6 +104,47 @@ def takes_it_somewhere_new(text, recent, scene=None):
         return bool(scene)
 
 
+# Words that might be asking a host to come along, or to stay put: only these go to the classifier.
+_COME = re.compile(r"\b(come|coming|follow|join|walk|step|go)\b.*\b(me|us|with|here|over|out|outside|hall|"
+                   r"hallway|along|private|privately|alone|kitchen|balcony|couch|bar)\b|\b(in private|privately|"
+                   r"a word with you|talk alone|alone for a sec|follow me|come with me|come here|over here)\b", re.I)
+_STAY = re.compile(r"\b(stay|stop following|stop|wait there|stay there|leave me alone|go back|don't follow|"
+                   r"dont follow|never ?mind)\b", re.I)
+
+
+def follow_request(text, recent, near):
+    """Is the guest asking Grace or Trip to come along with them (or to stop following)?
+    Returns 0 (Grace), 1 (Trip), 2 (both / whoever), -1 (stop), or None (neither)."""
+    if not (_COME.search(text) or _STAY.search(text)):
+        return None
+    try:
+        r = requests.post(LLM_URL, timeout=1.5, json={
+            "messages": [
+                {"role": "system", "content":
+                    "A guest is visiting Grace and Trip in their apartment. Words in *asterisks* or (parentheses) "
+                    "are actions. Decide whether the guest's words ask one of them to physically come along with "
+                    "the guest or come over to where the guest is (follow me, come here, come out to the hallway, "
+                    "can I talk to you in private). Answer with one word: GRACE, TRIP, BOTH (both of them, or "
+                    "it's unclear who), STOP (the guest tells them to stay where they are or stop following), or "
+                    "NO (anything else, including invitations to sit, drink or talk without moving).\n"
+                    "Examples: \"trip, come out here for a sec\" TRIP. \"follow me\" BOTH. \"grace can I talk to "
+                    "you in private\" GRACE. \"come on in\" NO. \"come on, really?\" NO. \"stay there\" STOP. "
+                    "\"you can stop following me\" STOP. \"stop fighting\" NO."},
+                {"role": "user", "content": f"Conversation:\n{recent}\n\nThe guest now: \"{text}\"\n"
+                                            f"(The host nearest the guest is {near.capitalize()}.)"},
+            ],
+            "temperature": 0.0, "max_tokens": 4, "chat_template_kwargs": {"enable_thinking": False},
+        })
+        r.raise_for_status()
+        out = r.json()["choices"][0]["message"]["content"].upper()
+    except (requests.RequestException, ValueError, KeyError, IndexError):
+        return None
+    for word, who in (("GRACE", 0), ("TRIP", 1), ("BOTH", 2), ("STOP", -1)):
+        if word in out:
+            return who
+    return None
+
+
 def moment(beat):
     """What off-script moment a reaction line is for, or None for an ordinary line."""
     for end, what in MOMENTS:

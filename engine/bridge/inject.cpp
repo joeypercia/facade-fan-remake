@@ -76,6 +76,8 @@ static bool understood_text(const char *text, std::string &out) {
     std::string reply;
     DWORD t0 = GetTickCount();
     if (!http_post(L"/understand", "{\"text\":" + json_str(text) + "}", reply, 1500)) return false;
+    size_t f = reply.find("\"follow\": ");   // the guest asked someone to come along (or to stay)
+    if (f != std::string::npos) follow_request(atoi(reply.c_str() + f + 10));
     if (reply.find("\"hide\": true") != std::string::npos) {  // scene words: the scene answers them
         logf("understand: \"%s\" goes to the scene (%lu ms)", text, GetTickCount() - t0);
         out.clear();
