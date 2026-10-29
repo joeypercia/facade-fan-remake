@@ -41,6 +41,7 @@ sys.path.insert(0, str(ROOT / "prototype"))
 sys.path.insert(0, str(ROOT / "game"))
 
 import facade_formats as ff  # noqa: E402
+import acts  # noqa: E402
 import improv  # noqa: E402
 import performance  # noqa: E402
 from catalog import Catalog  # noqa: E402
@@ -98,7 +99,7 @@ class Lines:
         # the evening otherwise pays several seconds of setup mid-scene.
         warm = self.by_id[("trip", 1074)]
         self.lead_in("trip", warm, warm["text"], ["hi!"], None)
-        self.restate("hi!", "")   # (the first typed line of the evening timed out without this)
+        self.read_acts("hi!", "")   # (the first typed line of the evening timed out without this)
         improv.takes_it_somewhere_new("hi!", "")
         self.generated = []
         INJECT.mkdir(parents=True, exist_ok=True)
@@ -195,10 +196,17 @@ class Lines:
             text = plain_ascii(re.sub(r"\*[^*]*\*|\([^)]*\)", " ", text.splitlines()[0])) if text else ""
             if not text or re.fullmatch(r"\W*none\W*", text, re.I):
                 return ""
+            # "Here's the short reply: Ha, never afraid..."
+            text = re.sub(r"^[^:]{0,40}\b(reply|response|line)\b[^:]{0,20}:\s*", "", text, flags=re.I)
+            if not text:
+                return ""
             text = text[0].upper() + text[1:]
-            meta = bool(re.search(r"\b(here's|here is) (\w+'s )?(line|response)|\b(scene|script|director)\b",
+            meta = bool(re.search(r"\b(here's|here is) (\w+'s )?(short )?(line|response|reply)|\b(scene|script|director)\b",
                                   text, re.I)) or text.lower().startswith(("sure,", "sure!", "certainly"))
-            echo = same_words(text, original, threshold=0.6)
+            # "That's not what I said." answering "huh thats not what i said": the guest's words back
+            parrot = any(same_words(text, s, threshold=0.6) or
+                         " ".join(words(text)[:4]) == " ".join(words(s)[:4]) for s in since)
+            echo = same_words(text, original, threshold=0.6) or parrot
             repeat = repeats(text, earlier)
             # "Hey, everything's fine. Hey! God it's been so long...": the same word twice in a row
             same_start = first_word(text) == first_word(original)
@@ -208,7 +216,9 @@ class Lines:
                        {"role": "user", "content":
                            "That repeats something already said tonight; reply with something new." if repeat else
                            f"The line starts with \"{first_word(original)}\" too; start the reply differently."
-                           if same_start else "Only the short reply (at most 12 words), not the line itself."}]
+                           if same_start else
+                           "Don't say the guest's words back; reply to them." if parrot else
+                           "Only the short reply (at most 12 words), not the line itself."}]
         return ""
 
     def improvise(self, char, scene, guest_words):
@@ -568,18 +578,19 @@ class Lines:
         asking = threading.Thread(target=lambda: follow.update(
             who=improv.follow_request(text, recent, self.nearer_host())), daemon=True)
         asking.start()
-        out, hide = self.restate(text, recent)
+        out, hide = self.read_acts(text, recent)
         asking.join(timeout=max(0.0, 1.3 - (time.time() - t0)))   # the bridge waits 1.5 s in all
         who = follow.get("who")
         if who is not None:
             log(f"    follow: {['stay', 'grace', 'trip', 'whoever is nearer'][who + 1]}")
         return out, hide, who
 
-    def restate(self, text, recent):
-        """Restate what the player typed in the plain phrasing Façade's 2005 parser recognizes, so the
-        original drama manager picks the right reaction. The real words go to tonight's memory.
-        Returns (text for the drama manager, hide): during a scene the scene answers instead, and the
-        drama manager (paused) hears nothing."""
+    def read_acts(self, text, recent):
+        """Which of Façade's reactions the guest meant (acts.py), handed to the 2005 parser as phrases it
+        is known to read that way, so the original drama manager picks the right reaction. The real words
+        go to tonight's memory. Returns (text for the drama manager, hide): hide when the drama manager
+        hears nothing, either during a scene (the scene answers) or when no reaction fits (the next
+        story line opens with a reply to the words)."""
         if self.came_in and improv.takes_it_somewhere_new(text, recent, self.scene):
             if self.scene:
                 self.scene.heard(text)
@@ -587,59 +598,55 @@ class Lines:
             self.scene = improv.Scene(f"the guest's \"{text}\"")
             self.scene.heard(text)
             log(f"    scene starts: {self.scene.what}")
-            # The story pauses at the drama manager's next line. Until then it hears the raw words, not
-            # one of the parser's stock acts ("I should go."), which it would act on.
-            plain = re.sub(r"[*()]", " ", text).strip()
-            log(f"    parser hears (as typed): {plain}")
-            return plain, False
+            # The story pauses at the drama manager's next line, and hears nothing meanwhile: the raw
+            # words drew stock reactions ("let's talk about something else": "You think I'm...
+            # communicative").
+            return "", True
         if self.scene:
             self.scene.guest_back = True   # the guest turned back to the evening: the story picks up
             log("    guest is back on the evening; the scene will close")
         r = requests.post(LLM_URL, timeout=1.3, json={   # (the bridge waits 1.5 s, then sends the raw words)
             "messages": [
-                {"role": "system", "content": UNDERSTAND_PROMPT},
+                {"role": "system", "content": ACTS_PROMPT},
                 {"role": "user", "content": (f"Just before:\n{recent}\n\n" if recent else "") +
                                             f"The guest typed: {text}"},
             ],
-            "temperature": 0.2, "max_tokens": 40, "chat_template_kwargs": {"enable_thinking": False},
+            "temperature": 0.1, "max_tokens": 24, "chat_template_kwargs": {"enable_thinking": False},
         })
         r.raise_for_status()
-        out = plain_ascii(r.json()["choices"][0]["message"]["content"].strip().splitlines()[0]).strip('"')
-        out = re.sub(r"^(the guest (typed|said|says)|guest|restated)\s*[:,]\s*", "", out, flags=re.I).strip().strip('"')
-        if not out or len(out) > 160:
-            return text, False
-        out = _HEARD.sub(lambda m: f"{m.group(1)}{m.group(2) or ''} notice{'d' if m.group(4).lower() == 'heard' else ''}", out)
+        answer = r.json()["choices"][0]["message"]["content"].strip()
+        out, picked = acts.render(answer.splitlines()[0] if answer else "", text)
+        log(f"    acts: {', '.join(picked) or 'none'} ({answer!r})")
+        if not out:
+            return "", True
         log(f"    parser hears: {out}")
         return out, False
 
 
-UNDERSTAND_PROMPT = """You help a 2005 keyword-based text parser understand a player in the interactive drama Façade.
-The player is a guest at Grace and Trip's apartment. Restate what the guest typed as ONE short, plain, complete
-sentence (or two) that keeps the same meaning and makes their intent obvious, using everyday words:
-- greetings: "Hi!", "Hello Grace.", "How are you?"
-- agreeing / disagreeing: "Yes.", "I agree.", "No.", "I disagree."
-- drinks: name the drink plainly: "I'd like a glass of merlot.", "I'll have a beer.", "Just water, please."
-- praise / criticism of things or people: "Your apartment is beautiful.", "That painting is ugly."
-- feelings and support: "I'm sorry.", "Are you okay?", "I'm on your side, Grace."
-- topics: marriage, divorce, sex, therapy, affairs, parents, the Italy trip, the wedding picture, the art.
-- flirting, hugging, kissing, leaving: say it plainly ("I want to hug you.", "I should go.").
-- words in *asterisks* or (parentheses) are actions: say what the guest does or means ("*hugs Grace*" ->
-  "I want to hug you, Grace."; "*sits on the couch*" -> "I'll sit down.").
-Fix spelling and slang ("hows it goin" -> "Hi! How are you?"). Keep names (Grace, Trip). If it's addressed to
-someone, keep who; never add a name the guest didn't use. Never add things the guest didn't mean: confusion
-stays confusion ("umm what" -> "What?"; "huh?" -> "What?"), and a question stays the same question
-("what happened" -> "What happened?").
-The parser takes some words as the guest's verdict on Grace or Trip, and they answer "You think I'm...":
-hear, heard, listen, talk (as "you're communicative"), fight, argue (angry), scared, afraid, hide, embarrassed
-(afraid), lie, pretend, fake (lying), blame, fault, problem (to blame), control, force, stop (controlling),
-alone, lonely (unloved). Use those words only when the guest really tells Grace or Trip what they are or should
-do ("you two should talk more", "you're lying", "stop fighting"). Otherwise say it without them:
-"i heard you guys arguing" -> "Is everything okay with you two?"; "that sounded scary" -> "Are you two okay?";
-"thought i heard a commotion" -> "Is everything okay?"; "can we talk about the painting" -> "Tell me about the
-painting."; "did you hear that?" -> "Did you notice that?". Output only the restated sentence."""
+ACTS_PROMPT = """You read what a guest typed in the interactive drama Façade (the guest is visiting Grace and Trip,
+a married couple, at their apartment) and say which of Façade's reactions it means. The menu:
+{menu}
 
-# Hearing words in a restatement that isn't advice: the parser would read "you're communicative".
-_HEARD = re.compile(r"\b(I|we|you)( just| thought I| thought we)? (over)?(heard|hear)\b", re.I)
+Answer with acts from the menu, written exactly as listed, and nothing else: usually one; two (comma
+separated) only when the guest plainly does two things, like greeting and asking. Add @grace or @trip when the
+guest speaks to one of them by name. Answer none when nothing on the menu says what the guest means: small talk, a
+story, a joke, a question that isn't about one of the things on the menu. The hosts then answer the words
+themselves, so none is much better than a wrong act.
+- Read it in context: "yes" or "sure" answering "want a drink?" is agree; "hows it goin" is hello, how_are_you.
+- you_are, you_should and reveal only when the guest really tells them that. Hearing them argue is not
+  "you are angry": "i heard you guys arguing" -> are_you_okay. "you two should talk more" -> you_should:talk.
+- Confusion is confused: "what?", "huh?", "what do you mean", "umm what" -> confused. "that's not what i said"
+  -> disagree. "really? tell me more" -> tell_me_more.
+- Comments on a thing: the thing plus beautiful or ugly: "love your place" -> about:apartment, beautiful; "nice painting" ->
+  about:paintings, beautiful.
+  "can we talk about the painting" -> about:paintings. Praise, criticize and insult are about Grace or Trip.
+- Questions about a topic are that topic: "are you guys getting divorced?" -> about:divorce; "how long have
+  you been married" -> about:marriage. "i'm with you, trip" -> ally @trip. "that's terrible" -> yuck.
+- Drinks: "i'd love a glass of wine" -> drink:red_wine; "just water" -> drink:water; "no thanks" -> disagree.
+- Words in *asterisks* are actions: "*hugs grace*" -> support @grace.
+- goodbye only when the guest is really leaving.
+- "anyway, how was your day" -> none. "let's talk about something else" -> none. "something knocked" -> none."""
+ACTS_PROMPT = ACTS_PROMPT.replace("{menu}", acts.menu())
 
 def fragment(line):
     """A piece of a sentence the drama manager plays across several lines ("You think we should....",
@@ -664,6 +671,10 @@ def first_sentences(text, max_words):
 def first_word(text):
     m = re.search(r"[A-Za-z']+", text)
     return m.group().lower() if m else ""
+
+
+def words(text):
+    return re.findall(r"[a-z']+", text.lower().replace("'", ""))
 
 
 def repeats(text, earlier):

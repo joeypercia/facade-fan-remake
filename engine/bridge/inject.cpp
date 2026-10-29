@@ -69,7 +69,7 @@ static void report_heard(const char *text) {
     CloseHandle(CreateThread(NULL, 0, heard_thread, body, 0, NULL));
 }
 
-// The player's text restated (by the service's LLM) in phrasing the 2005 parser recognizes.
+// What the player meant, as phrases the 2005 parser reads as the reactions the service's LLM picked.
 // Returns false (keep the original text) if the service isn't running or is slow.
 static bool understood_text(const char *text, std::string &out) {
     if (!text || !*text || strcmp(text, " ") == 0 || strcmp(text, "warm up nlu") == 0) return false;

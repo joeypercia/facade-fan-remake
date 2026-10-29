@@ -143,14 +143,39 @@ across several lines ("You think I'm...") got invented endings ("...a failure?")
   recording (the per-name fragments) is still voiced whole.
 - Fragments and bare reactions ("Uh...", "get divorced...") always play as written; the guest's
   words then wait for the next whole line.
-- The parser restatement no longer adds meaning ("umm what" stays "What?").
 - **The parser's trait words.** Façade's parser treats some words as the guest's verdict on a host,
   and the drama manager answers "You think I'm... communicative..." (`general.rul` in the install,
   zlib-compressed: rules `ipExplainAdviceParam_*`). "heard", "hear", "listen" and "talk" count as
   *communicative*, "fight" and "argue" as *angry*, "scared" and "hide" as *afraid*, and so on. "I
-  heard all this arguing" drew exactly that in the second play test. The restatement now uses those
-  words only when the guest really tells a host what they are or should do; "I heard..." becomes "I
-  noticed..." either way.
+  heard all this arguing" drew exactly that in the second play test. Rewording around them didn't
+  hold up ("I noticed arguing" still reads as *angry*; "let's talk about something else" as advice
+  to communicate), hence the act menu below.
+
+## What the guest meant: Façade's own reactions (2026-10-29)
+
+The guest's words used to be reworded by the model into plainer English for the 2005 parser. That
+was a second free-form sentence going through the same keyword rules, and it drifted. Now the model
+only picks what the guest meant from the reactions the parser knows, and the parser is handed fixed
+phrases that are known to read that way (`engine/service/acts.py`).
+
+- **The parser's reactions** are discourse acts: 33 types (Agree, Disagree, Greet, Praise,
+  Criticize, ReferTo a thing or topic, Explain "you are ...", Advice "you should ...", ExplBig
+  "Trip is cheating"...) with parameters (17 objects, 7 topics, 23 traits and advice, 20 drinks).
+  One line usually yields several; the drama manager's reaction decider chooses among them.
+- **The menu** (`acts.py`) has an entry per act the guest can mean, each with a phrase: agree →
+  "Yes.", about:paintings → "The paintings.", you_are:lying → "You are lying.", drink:red_wine → "I'll
+  have a red wine."... The model answers with one or two entries and @grace or @trip, kept only when
+  the guest named that host. A near miss of an entry's name is mended ("reveal:trip_cheating").
+- **Nothing fits** (small talk, a story, "let's talk about something else"): the drama manager hears
+  nothing, and the next story line opens with a reply to the words. This replaces the parser's
+  "didn't understand" reactions, which read as the hosts being shocked by ordinary remarks.
+- **Checked against the real parser.** `tools/nlu_probe` runs Façade's own parser (its
+  `TemplateCompiler` classes and rules, read from the install) outside the game, in 3 s, and prints
+  the acts it reads. `verify_acts.py` runs every entry alone, addressed to Trip and paired with
+  another: 265/265 read as intended. The game's own `java.log` shows the same acts in play.
+- **Speed and accuracy:** picking takes 0.09 s (median) against 0.3-1 s for the rewording. On 40
+  typical guest lines (greetings, the argument, confusion, comments, drinks, advice, small talk) 39
+  matched what the guest meant.
 - **Repeats.** Generated lines are checked against everything generated tonight: much the same
   words, the same first four words, any shared run of five words, or a whole sentence again ("Want
   a drink?"). A rejected scene line starts the request over with the rejected text named, instead

@@ -1,0 +1,20 @@
+# Act picking test (10-29): the guest's words reach the 2005 parser as reactions it knows (acts.py),
+# not as a rewording. "I heard arguing" must not draw "You think I'm...", confusion and small talk
+# must not get a stock reaction, and comments, drinks and advice must reach the drama manager.
+0 shots 10
+@tr_intro_end+26 subtitles on
+@tr_intro_end+32 key J 0.2
+@tr_intro_end+36 key RETURN 0.2
+@tr_intro_end+50 key UP 1.5
+@tr_intro_end+62 say hi trip everything ok
+@tr_intro_end+100 key UP 2.5
+@tr_intro_end+108 say hi guys!
+@tr_intro_end+122 say i heard all this arguing when i walked in, is everything ok?
+@tr_intro_end+150 say huh thats not what i said
+@tr_intro_end+170 say what do you mean
+@tr_intro_end+190 say lets talk about something else
+@tr_intro_end+205 say anyway, your apartment looks great
+@tr_intro_end+225 say I'd love a glass of wine
+@tr_intro_end+250 say i love that painting
+@tr_intro_end+270 say you two should talk more
+@tr_intro_end+295 say trip, are you okay?
