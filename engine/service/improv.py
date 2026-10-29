@@ -26,7 +26,17 @@ from config import LLM_URL
 QUIET_S = 20      # nobody (guest or hosts) has added anything for this long: the scene is over
 CHIME_S = 12      # the guest has been quiet this long: a host keeps the scene going...
 MAX_CHIMES = 1    # ...at most this many times in a scene (one after every answer sounded like a rerun)
-MAX_S = 240
+MAX_S = 120
+MAX_LINES = 6     # host lines in one scene; then the story picks up again (a play test's scene never ended)
+
+# The guest waiting on the hosts: the scene has stalled (it can't show anyone fetching anything).
+_WAITING = re.compile(r"\b(any ?day now|why are (you|u) (guys )?(just )?(standing|waiting)|what are (you|u) (guys )?"
+                      r"waiting for|(i'?m|im) still waiting|hello\?+|are (you|u) (even )?listening|so\.\.\.+|"
+                      r"get on with it|still waiting)", re.I)
+
+
+def waiting(text):
+    return bool(_WAITING.search(text))
 
 # beat-name ending -> what is happening (the beat names are the catalog's, e.g. T1L2LEAVEAPARTMENT)
 MOMENTS = [

@@ -1,0 +1,21 @@
+# Stuck-scene test (10-29 play test): a scene of several lines must play each line's own audio (the
+# engine keeps every voice file it has loaded, so lines that shared a file number replayed the first),
+# an answer to the drinks beat must stay in the story, the hosts stay in character and never go off
+# to fetch things, and a guest who's left waiting ends the scene.
+0 shots 10
+@tr_intro_end+26 subtitles on
+@tr_intro_end+32 key J 0.2
+@tr_intro_end+36 key RETURN 0.2
+@tr_intro_end+50 key UP 1.5
+@tr_intro_end+62 say hi trip
+@tr_intro_end+100 key UP 2.5
+@tr_intro_end+108 say hi guys!
+@tr_intro_end+130 say do you guys believe in ghosts? I think this building is haunted
+@tr_intro_end+148 say *knocks on the wall three times* did you hear that?
+@tr_intro_end+166 say seriously, i swear something knocked back
+@tr_intro_end+184 say what was that??
+@tr_intro_end+205 say anyway, I'd love a drink
+@tr_intro_end+235 say nah i need me some real drinks
+@tr_intro_end+255 say now we're talking
+@tr_intro_end+275 say any day now
+@tr_intro_end+295 say why are you just standing there

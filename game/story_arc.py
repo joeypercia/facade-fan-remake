@@ -20,13 +20,18 @@ CHARACTERS = {
         "Grace: trained as an artist but works in advertising design, which she quietly resents. Refined "
         "taste, constantly redecorating. Outwardly gracious and witty; underneath, frustrated and lonely, "
         "feeling Trip never let her become who she wanted to be and that her family's money has bent "
-        "their life. She needles Trip with polite contradictions and reaches for the guest as an ally."
+        "their life. She needles Trip with polite contradictions and reaches for the guest as an ally. "
+        "She never plays bartender: the drinks are Trip's show, and she reins it in (\"Trip, let's not go "
+        "crazy with the drinks\"), offering the guest something simple instead, juice, mineral water, a "
+        "glass of white wine. She avoids her own parents."
     ),
     "trip": (
         "Trip: grew up working class; now a successful salesman. Eager, charming, a showman who tries too "
         "hard to make everything look perfect. Insecure about his background and about whether Grace "
         "loves him. Covers tension with jokes and hosting energy, gets defensive when Grace undercuts "
-        "him, and tries to recruit the guest onto his side."
+        "him, and tries to recruit the guest onto his side. The bar is his: he pushes fancy cocktails "
+        "(martinis, cosmopolitans, his new shakers and imported glasses) and makes every drink himself. "
+        "He admires Grace's wealthy parents."
     ),
 }
 
@@ -117,13 +122,13 @@ ARC = [
         "cue": "*The phone rings*",
         "title": "Phone call",
         "situation": (
-            "The phone rings. It's Trip's parents. Trip avoids picking up and lets the answering machine "
-            "take it; family, money and class come up, and Grace's and Trip's resentments about each "
-            "other's families slip out."
+            "The phone rings. It's Grace's parents. Trip wants to pick up and say hello; Grace won't talk "
+            "to them and lets the answering machine take it. Her father's message plays; family, money "
+            "and class come up, and Grace's and Trip's resentments about each other's families slip out."
         ),
         "goals": {
-            "trip": "Avoid talking about his parents; change the subject back to a nice evening.",
-            "grace": "Needle Trip about his avoidance, while defending her own family.",
+            "trip": "Be on good terms with Grace's parents; smooth it over and get back to a nice evening.",
+            "grace": "Keep her parents out of tonight; resent their expectations and Trip's admiration of them.",
         },
         "ends_when": "The call has been handled or ignored and the tension it raised has been aired.",
         "turns": (1, 3),

@@ -151,6 +151,34 @@ across several lines ("You think I'm...") got invented endings ("...a failure?")
   hold up ("I noticed arguing" still reads as *angry*; "let's talk about something else" as advice
   to communicate), hence the act menu below.
 
+## Voice files load once (2026-10-29)
+
+The engine opens each voice file the first time its number plays and keeps it for the rest of the
+evening: in four session logs no voice file was ever opened twice. A generated line that kept its
+record's own number therefore played whatever that number first held. Scene lines all ride one
+template record per character, so from a host's second scene line on, the subtitles changed and the
+first line's audio played again (third play test). A story line replaced once would also have played
+its generated audio again whenever it came back as written. Now every generated line's speech block
+names a number no record refers to: the gaps in the original numbering (416 for Grace, 261 for
+Trip), then numbers past the end. The bridge serves the generated WAV for whichever number the job
+names.
+
+## Scenes stay in the play (2026-10-29)
+
+Third play test: "nah I need me some real drinks", said while Trip offered cocktails, started an
+off-script scene in which Grace offered to fetch bourbon. The engine can't show that, she stood
+there, every further word kept the scene going, and the story never came back. Now:
+
+- The act menu is asked first; only words that fit nothing on it can start a scene. An answer to the
+  beat (a drink, a comment, agreeing) goes to the drama manager.
+- Scene prompts carry the play's current beat (`game/story_arc.py`: the situation and what each
+  host wants) and the characters as written: Trip makes every drink, Grace never serves and reins
+  him in. The phone-call beat had Trip's parents calling; it's Grace's.
+- Nobody leaves the room or fetches anything: lines promising an errand ("I'll get the bourbon", "be
+  right back") are rejected, scene lines and lead-ins alike.
+- A scene ends after 6 host lines or 2 minutes, or when the guest is left waiting ("any day now",
+  "why are you just standing there"); the next story line answers what's left.
+
 ## What the guest meant: Façade's own reactions (2026-10-29)
 
 The guest's words used to be reworded by the model into plainer English for the 2005 parser. That

@@ -41,6 +41,10 @@ SIMPLE = {
     "ugly":         ("Ugly.", "NegativeExcl"),
 }
 
+# Entries that say little about what the guest wants: picking only these doesn't keep the guest's words
+# from being something new of their own (line_service.read_acts).
+VAGUE = {"maybe", "confused", "tell_me_more", "wow", "yuck", "laugh", "happy", "sad"}
+
 ABOUT = {
     "apartment":       ("The apartment.", "ReferTo styleApartment"),
     "decorating":      ("The decorating.", "ReferTo artistAdv_decorating"),

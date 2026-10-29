@@ -47,7 +47,7 @@ import performance  # noqa: E402
 from catalog import Catalog  # noqa: E402
 from config import LLM_URL  # noqa: E402
 from phonemes import text_to_codes  # noqa: E402
-from story_arc import CHARACTERS, SETTING  # noqa: E402
+from story_arc import ARC, CHARACTERS, SETTING  # noqa: E402
 from voice import same_words  # noqa: E402
 
 FACADE = Path(os.environ.get("FACADE_DIR", r"C:\Program Files (x86)\Facade"))
@@ -87,9 +87,19 @@ class Lines:
         self.ended_at = 0.0   # when the last scene ended
         self.hall_done = False  # this trip out to the hallway has had its scene
         self.lines_kind = "answer"
+        self.beat = None      # the last story line's beat that story_arc knows (beat_for)
         # Scene lines need a record to ride on: an ordinary onscreen line per character (its slot is
         # only borrowed while the story is paused, so the drama manager can't want it meanwhile).
         self.template = {c: self.pick_template(c) for c in CHARS.values()}
+        # The engine loads each voice file once and keeps it for the evening, so a generated line that
+        # reused its record's own file number played whatever that number first held (a scene's lines
+        # all rode one template: new subtitles, the first line's audio). Each generated line gets a
+        # number no record refers to: the gaps in the original numbering, then past its end.
+        self.free_files, self.next_file = {}, {}
+        for c in CHARS.values():
+            used = {p.base_frame + 1 for p in self.perf[c].values() if p.base_frame is not None}
+            self.free_files[c] = [n for n in range(1, max(used)) if n not in used]
+            self.next_file[c] = max(used) + 1
         self.lock = threading.Lock()
         from voice import Voices
         self.voices = Voices(self.catalog, mute=True)
@@ -210,7 +220,8 @@ class Lines:
             repeat = repeats(text, earlier)
             # "Hey, everything's fine. Hey! God it's been so long...": the same word twice in a row
             same_start = first_word(text) == first_word(original)
-            if len(text.split()) <= 18 and not (meta or echo or repeat or same_start):
+            errand = bool(ERRAND.search(text))   # "On me, I'll be right back with a bottle."
+            if len(text.split()) <= 18 and not (meta or echo or repeat or same_start or errand):
                 return text
             prompt += [{"role": "assistant", "content": text},
                        {"role": "user", "content":
@@ -233,10 +244,13 @@ class Lines:
         if last and last[0] != char:   # "I didn't say anything about the ceiling" (Grace had)
             said_last = (f" The last host line was {last[0].capitalize()}'s, not {char.capitalize()}'s: "
                          f"\"{last[1]}\".")
+        beat = self.beat_now()
+        in_play = (f"Where the play is: {beat['situation']} {char.capitalize()} wants: "
+                   f"{beat['goals'][char]} {other.capitalize()} wants: {beat['goals'][other]}\n" if beat else "")
         if guest_words:
             task = (f"The guest just said or did: \"{' / '.join(guest_words[-3:])}\".{said_last} {char.capitalize()} "
                     f"answers the guest directly: if it's a question or a request to {char.capitalize()}, answer it "
-                    f"or do it (or refuse, in character).")
+                    f"(or refuse, in character).")
         else:
             task = (f"The guest has gone quiet. {char.capitalize()} keeps the moment going: a question to the "
                     f"guest, a reaction to what was just said, or a remark to {other.capitalize()}.")
@@ -251,6 +265,12 @@ class Lines:
                 "Don't steer back to earlier topics. Say plain, concrete things about what's happening right "
                 "now; no cryptic metaphors, and don't keep coming back to the same joke. Take the guest's "
                 "words at face value: an ordinary question gets a straight answer, never shock or offence.",
+                "Be exactly the Grace and Trip of the play, in their own voices and with their own habits, as "
+                "in their lines tonight: never do or offer what the other one does (Trip makes the drinks; "
+                "Grace never serves them), and keep their tension with each other.",
+                "Nobody can leave the room, fetch or bring anything, or start doing something: say only "
+                "words. Never promise to go and get something or do it later (\"I'll get the bourbon\", "
+                "\"be right back\"); answer, react, tease or refuse instead.",
                 "Stay consistent with the conversation and with where everyone physically is: never say you "
                 "are somewhere you aren't, never invent facts about the guest, and don't speak for "
                 f"{other.capitalize()} or the guest. Words in "
@@ -263,7 +283,7 @@ class Lines:
             ])},
             {"role": "user", "content":
                 (f"Tonight so far:\n{recent}\n\n" if recent else "") +
-                f"What's going on: {scene.what}.\n" + (f"{place}\n" if place else "") + task +
+                in_play + f"What's going on: {scene.what}.\n" + (f"{place}\n" if place else "") + task +
                 f"\nWrite {char.upper()}'s line."},
         ]
         earlier = self.generated[-30:] + [t for _, t in self.memory[-20:]]
@@ -284,9 +304,15 @@ class Lines:
             # the model talking about the task ("Sure, here's Trip's line...") instead of doing it
             meta = bool(re.search(r"\b(here's|here is) (\w+'s )?(line|response)|\bin character\b|\b(scene|script)\b",
                                   text, re.I)) or text.lower().startswith(("sure,", "sure!", "certainly"))
-            if text and not repeat and not narration and not meta:
+            errand = bool(text and ERRAND.search(text))
+            if text and not repeat and not narration and not meta and not errand:
                 return text
-            log(f"    (scene line rejected: {'repeat' if repeat else 'meta' if meta else 'other'}: {text})")
+            log(f"    (scene line rejected: {'repeat' if repeat else 'meta' if meta else 'errand' if errand else 'other'}: {text})")
+            if errand:   # start over, naming what it can't do
+                prompt[1] = {"role": "user", "content": prompt[1]["content"] +
+                             "\n(Nobody goes anywhere or fetches anything: only words.)"}
+                prompt = prompt[:2]
+                continue
             if meta or repeat or not text:
                 # Start over rather than argue with it: shown its own attempt, it rewrote the same line
                 # ("I heard that. It sounded like a knock..." three times). Empty: it wrote only an *action*.
@@ -385,6 +411,8 @@ class Lines:
         if not primary:
             return {"replace": False}
         script, line = primary
+        if beat_for(line["beat"]):
+            self.beat = line["beat"]
         if where:
             self.where = where
             if improv.inside(where):
@@ -446,14 +474,22 @@ class Lines:
             f"    answering: {' / '.join(since) or '-'}\n    now: {text}")
         return out
 
+    def fresh_file(self, char):
+        """A voice file number the engine hasn't loaded tonight (see free_files)."""
+        if self.free_files[char]:
+            return self.free_files[char].pop(0)
+        self.next_file[char] += 1
+        return self.next_file[char] - 1
+
     def emit(self, char, script, text, audio, pick, rec=None):
         """Queue a generated line for the engine (see the module docstring) and remember it.
         `pick`: the acting (performance.choose), or None to leave it to the drama manager.
         `rec`: the record to play (default: `script`'s, retimed to the audio)."""
-        file_no = self.perf[char][script].base_frame + 1
+        file_no = self.fresh_file(char)
         wav_path = INJECT / f"{char}_{file_no}_{uuid.uuid4().hex[:8]}.wav"
         _write_wav(wav_path, audio)
-        rec = rec or self.record(char, script, text, len(audio) / OUT_SR, audio)
+        rec = list(rec or self.record(char, script, text, len(audio) / OUT_SR, audio))
+        rec[rec.index(ff.OP_SPEECH) + 1] = file_no - 1   # the speech block names its voice file, minus one
         stem = INJECT / f"{char}_{script}"
         np.array(rec, "<i4").tofile(stem.with_suffix(".tok"))
         stem.with_suffix(".job.tmp").write_text(f"file={file_no}\nwav={wav_path}\n", encoding="utf-8")
@@ -488,6 +524,10 @@ class Lines:
         log(f"    story paused at {char} #{line['script_index']} {line['beat']}")
         return True
 
+    def beat_now(self):
+        """The play's beat the evening is in (game/story_arc.py), for scenes to stay in it."""
+        return beat_for(self.beat) if self.beat else None
+
     def nearer_host(self):
         p = self.where.get("player")
         if not p or not self.where.get("grace") or not self.where.get("trip"):
@@ -518,6 +558,8 @@ class Lines:
             return self.end_scene("the guest is back on the evening")
         if now - s.started > improv.MAX_S:
             return self.end_scene("time")
+        if len(s.speakers) >= improv.MAX_LINES:
+            return self.end_scene("long enough")   # (unanswered words: the story's next line answers them)
         words = list(s.inbox)
         if words:
             # A named host answers; a follow-up ("what do you mean") goes to whoever just spoke;
@@ -591,10 +633,33 @@ class Lines:
         go to tonight's memory. Returns (text for the drama manager, hide): hide when the drama manager
         hears nothing, either during a scene (the scene answers) or when no reaction fits (the next
         story line opens with a reply to the words)."""
-        if self.came_in and improv.takes_it_somewhere_new(text, recent, self.scene):
-            if self.scene:
-                self.scene.heard(text)
-                return "", True
+        picked = None
+        if self.scene:
+            if improv.waiting(text):
+                # "any day now", "why are you just standing there": the scene has stalled
+                log("    the guest is waiting on the hosts; the scene will close")
+            else:
+                # Asking for a drink or bringing up the apartment's things is the evening itself (the
+                # classifier kept "anyway, I'd love a drink" in a ghost scene, and Trip handed over a
+                # drink that didn't exist).
+                out, picked = self.pick_acts(text, recent)
+                back = any(a.startswith(("drink:", "about:")) or a == "goodbye" for a in picked)
+                if not back and improv.takes_it_somewhere_new(text, recent, self.scene):
+                    self.scene.heard(text)
+                    return "", True
+            self.scene.guest_back = True   # the guest turned back to the evening: the story picks up
+            log("    guest is back on the evening; the scene will close")
+        if picked is None:
+            out, picked = self.pick_acts(text, recent)
+        # Only words that fit nothing on the menu, or only its vaguest entries ("maybe" for "do you
+        # believe in ghosts?"), may take the evening somewhere new. (An answer to the beat itself,
+        # "nah I need me some real drinks" while Trip offers cocktails, went off into a scene where
+        # Grace fetched bourbon and the story never came back.)
+        vague = set(picked) <= acts.VAGUE
+        if out and not vague:
+            log(f"    parser hears: {out}")
+            return out, False
+        if self.came_in and not self.scene and improv.takes_it_somewhere_new(text, recent):
             self.scene = improv.Scene(f"the guest's \"{text}\"")
             self.scene.heard(text)
             log(f"    scene starts: {self.scene.what}")
@@ -602,10 +667,14 @@ class Lines:
             # words drew stock reactions ("let's talk about something else": "You think I'm...
             # communicative").
             return "", True
-        if self.scene:
-            self.scene.guest_back = True   # the guest turned back to the evening: the story picks up
-            log("    guest is back on the evening; the scene will close")
-        r = requests.post(LLM_URL, timeout=1.3, json={   # (the bridge waits 1.5 s, then sends the raw words)
+        if out:
+            log(f"    parser hears: {out}")
+            return out, False
+        return "", True
+
+    def pick_acts(self, text, recent):
+        """(phrase for the parser, acts) for what the guest meant; ("", []) when nothing fits."""
+        r = requests.post(LLM_URL, timeout=1.0, json={   # (the bridge waits 1.5 s, then sends the raw words)
             "messages": [
                 {"role": "system", "content": ACTS_PROMPT},
                 {"role": "user", "content": (f"Just before:\n{recent}\n\n" if recent else "") +
@@ -617,10 +686,7 @@ class Lines:
         answer = r.json()["choices"][0]["message"]["content"].strip()
         out, picked = acts.render(answer.splitlines()[0] if answer else "", text)
         log(f"    acts: {', '.join(picked) or 'none'} ({answer!r})")
-        if not out:
-            return "", True
-        log(f"    parser hears: {out}")
-        return out, False
+        return out, picked
 
 
 ACTS_PROMPT = """You read what a guest typed in the interactive drama Façade (the guest is visiting Grace and Trip,
@@ -666,6 +732,21 @@ def first_sentences(text, max_words):
             break
         out += s
     return out.strip()
+
+
+# A host promising to go somewhere or fetch something: the engine can't show it, and the guest waits for
+# it forever ("I'll get the bourbon." Grace stood there).
+ERRAND = re.compile(r"\b(i'?ll|i will|let me|lemme|i'?m (gonna|going to)|i can) (go |run |just |quickly )*"
+                    r"(get|grab|fetch|bring|pour|find|look for|check)\b|\bbe right back\b|\bback in a (sec|second|minute)\b|"
+                    r"\bhere you go\b|\bhere'?s (your|a|the) (drink|glass)\b",
+                    re.I)
+
+
+def beat_for(name):
+    """The story_arc beat a catalog beat name belongs to (longest matching prefix), or None."""
+    best = max(((len(e), b) for b in ARC for e in b["examples_from"] if name.startswith(e)),
+               key=lambda m: m[0], default=None)
+    return best[1] if best else None
 
 
 def first_word(text):
