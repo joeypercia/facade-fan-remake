@@ -83,7 +83,8 @@ static void report_heard(const char *text);
 static bool understood_text(const char *text, std::string &out);
 static const char *redirect_wav(const char *name, std::string &keep);
 static void restore_lines(int ch);
-static void inject_attach();
+static void inject_attach(HMODULE eng);
+static void note_voice(const char *name, const char *opened);
 // perform.cpp: LLM-directed expression, gesture and gaze
 static void perf_start(JNIEnv *env, jclass cls, int ch, const char *spec);
 static void perf_due(JNIEnv *env, jclass cls);
@@ -96,6 +97,7 @@ static bool scene_on();
 static bool door_guard(JNIEnv *env, int ch, int part, jint &script);
 static void speech_started(int ch);
 static void speech_finished(int ch);
+static void speech_aborted(int ch);
 
 BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
@@ -151,6 +153,7 @@ static void *WINAPI hook_mmioOpenA(LPSTR name, void *info, DWORD flags) {
     void *h = real_mmioOpenA((LPSTR)use, info, flags);
     if (!h && use != name) h = real_mmioOpenA(name, info, flags);  // generated file unreadable: original
     note_open(name);
+    if (h) note_voice(name, use);
     logf("mmioOpenA \"%s\" flags=0x%lx -> %p", name ? name : "(null)", flags, h);
     return h;
 }
@@ -183,7 +186,7 @@ static void engine_attach() {
     logf("engine: hooks mmioOpenA=%s CreateFileA=%s", real_mmioOpenA ? "on" : "MISSING",
          real_CreateFileA ? "on" : "MISSING");
     autopilot_attach(eng);  // only does anything in automated test runs
-    inject_attach();
+    inject_attach(eng);
 
     scroll_text_box(eng);
 }
@@ -404,6 +407,7 @@ JNI_FN(void, pushPoseScript, jint ch, jint script, jobject act) {
 }
 JNI_FN(void, abortAnimationScripts, jint ch, jint layer) {
     logf("abortAnimationScripts ch=%d layer=%d", ch, layer);
+    if (layer == 7) speech_aborted(ch);
     CALL(void, abortAnimationScripts, 16, (JNIEnv *, jclass, jint, jint), env, cls, ch, layer);
 }
 

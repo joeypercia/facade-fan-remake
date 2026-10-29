@@ -5,6 +5,7 @@
 // Script lines: <seconds since start> <action> [args]
 //   key <KEY> <hold seconds>     hold a key (RETURN ESCAPE SPACE UP DOWN LEFT RIGHT, A-Z, 0-9)
 //   click [left|right]           a mouse click
+//   subtitles [on|off]           switch the engine's subtitles (the menu's toggle)
 //   move <dx> <dy>               relative mouse movement
 //   say <text...>                as if the player typed text and pressed Enter
 //   shot                         save the next frame to %LOCALAPPDATA%\FacadeFanRemake\frames
@@ -43,6 +44,7 @@ static double g_shot_every;
 static BYTE g_keys[256];                 // DirectInput key codes currently held by the autopilot
 static DWORD g_key_until[256];
 static volatile LONG g_mouse_dx, g_mouse_dy, g_click;
+static BYTE *g_ap_eng;   // the engine module (for "subtitles")
 
 static double since() { return (GetTickCount() - g_t0) / 1000.0; }
 
@@ -334,6 +336,8 @@ static void run_step(const Step &st) {
         InterlockedIncrement(&g_shot);
     } else if (st.action == "shots") {
         g_shot_every = atof(st.arg.c_str());
+    } else if (st.action == "subtitles") {  // the menu's "Subtitles: On" (its flag, 0x10979471 in v1.1)
+        if (g_ap_eng) *(g_ap_eng + 0x979471) = st.arg.find("off") == std::string::npos;
     }
 }
 
@@ -359,6 +363,7 @@ static void autopilot_attach(HMODULE eng) {
     InitializeCriticalSection(&g_events_lock);
     InitializeCriticalSection(&g_opened_lock);
     g_t0 = GetTickCount();
+    g_ap_eng = (BYTE *)eng;
     real_DI8Create = (DI8Create)patch_iat(eng, "DINPUT8.dll", "DirectInput8Create", (void *)hook_DI8Create);
     real_GetForeground = (HwndFn)patch_iat(eng, "USER32.dll", "GetForegroundWindow", (void *)hook_GetForeground);
     real_GetAsyncKeyState = (KeyFn)patch_iat(eng, "USER32.dll", "GetAsyncKeyState", (void *)hook_GetAsyncKeyState);

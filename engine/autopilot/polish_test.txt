@@ -1,0 +1,23 @@
+# Dialogue polish test (10-29 play test): greetings and questions about the argument get answered
+# (a generated lead-in, then the actor's take), "I heard arguing" mustn't draw "You think I'm...
+# communicative", confusion doesn't start a scene, a ghost scene doesn't repeat itself. Frames every
+# 0.25 s around the greeting, to check that subtitles stay up until the speech ends.
+0 shots 3
+@tr_intro_end+26 subtitles on
+@tr_intro_end+28 shot
+@tr_intro_end+32 key J 0.2
+@tr_intro_end+36 key RETURN 0.2
+@tr_intro_end+40 shots 0.25
+@tr_intro_end+50 key UP 1.5
+@tr_intro_end+62 say hi trip everything ok
+@tr_intro_end+100 key UP 2.5
+@tr_intro_end+108 say hi guys!
+@tr_intro_end+122 say i heard all this arguing when i walked in, is everything ok?
+@tr_intro_end+140 shots 3
+@tr_intro_end+150 say huh thats not what i said
+@tr_intro_end+170 say do you guys believe in ghosts? I think this building is haunted
+@tr_intro_end+190 say *knocks on the wall three times* did you hear that?
+@tr_intro_end+210 say what do you mean
+@tr_intro_end+225 say seriously, something knocked back
+@tr_intro_end+250 say anyway, your apartment looks great
+@tr_intro_end+270 say I'd love a glass of wine

@@ -31,6 +31,9 @@ static Shared *shared() {
 static volatile LONG g_spoke[2];
 static void speech_started(int ch) { if (ch == 0 || ch == 1) g_spoke[ch] = (LONG)GetTickCount(); }
 static void speech_finished(int ch) { if ((ch == 0 || ch == 1) && shared()) shared()->finished[ch] = (LONG)GetTickCount(); }
+// The drama manager cut the line off (abortAnimationScripts, layer 7): no ScriptFinished follows, and
+// without this that host counted as mid-line for 30 s (Grace took every line of a scene meanwhile).
+static void speech_aborted(int ch) { if (ch == 0 || ch == 1) g_spoke[ch] = 0; }
 static bool speaking(int ch) {
     LONG start = g_spoke[ch], now = (LONG)GetTickCount();
     if (!start || now - start > 30000) return false;

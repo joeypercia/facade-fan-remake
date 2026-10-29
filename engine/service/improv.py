@@ -25,7 +25,7 @@ from config import LLM_URL
 
 QUIET_S = 20      # nobody (guest or hosts) has added anything for this long: the scene is over
 CHIME_S = 12      # the guest has been quiet this long: a host keeps the scene going...
-MAX_CHIMES = 1    # ...at most this many times in a row
+MAX_CHIMES = 1    # ...at most this many times in a scene (one after every answer sounded like a rerun)
 MAX_S = 240
 
 # beat-name ending -> what is happening (the beat names are the catalog's, e.g. T1L2LEAVEAPARTMENT)
@@ -51,14 +51,13 @@ class Scene:
         self.why = why            # "words" (the guest's), "moment" (a stock reaction), "outside"
         self.started = self.last_guest = self.last_line = time.time()
         self.inbox = []           # the guest's words not answered yet
-        self.chimes = 0           # host lines in a row with no guest input
+        self.chimes = 0           # host lines with no guest input before them
         self.speakers = []        # who has spoken in the scene
         self.guest_back = False   # the guest's own words turned back to the evening
 
     def heard(self, text):
         self.inbox.append(text)
         self.last_guest = time.time()
-        self.chimes = 0
 
     def spoke(self, char):
         self.speakers.append(char)
@@ -84,12 +83,14 @@ def takes_it_somewhere_new(text, recent, scene=None):
                     "You judge what a guest visiting old friends Grace and Trip is doing. Words in *asterisks* "
                     "or (parentheses) are actions. Answer with one word, NEW or USUAL.\n"
                     "USUAL: greetings, thanks, small talk, drinks, compliments or complaints about the "
-                    "apartment and its things, questions about Grace and Trip, their marriage or their jobs, "
-                    "agreeing, disagreeing, taking sides, hugging, saying goodbye.\n"
+                    "apartment and its things, questions about Grace and Trip, their marriage, their fighting "
+                    "or their jobs, agreeing, disagreeing, taking sides, being confused or correcting what "
+                    "they thought you said, hugging, saying goodbye.\n"
                     "NEW: a topic, game, story or activity of the guest's own that has nothing to do with the "
                     "visit (ghosts, juggling, a seance, a dance-off), odd physical actions, asking one of them to "
                     "step out or talk somewhere else, inviting them somewhere else.\n"
                     "Examples: \"hi guys!\" USUAL. \"your place looks great\" USUAL. \"are you two okay?\" "
+                    "USUAL. \"I heard you arguing\" USUAL. \"huh, that's not what I said\" USUAL. \"what?\" "
                     "USUAL. \"I'll have a beer\" USUAL. \"*juggles oranges*\" NEW. \"let's play hide and "
                     "seek\" NEW. \"I think this building is haunted\" NEW. \"trip, come out to the hallway "
                     "for a sec\" NEW. When unsure: " + ("NEW." if scene else "USUAL.")},

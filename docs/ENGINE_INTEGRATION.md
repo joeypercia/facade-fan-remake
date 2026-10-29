@@ -132,11 +132,55 @@ across several lines ("You think I'm...") got invented endings ("...a failure?")
 - A story line plays as written, in the actor's own take, unless the guest has said something no
   line has answered yet (within 25 s), or a scene just ended.
 - Then the character first says a short generated reply (at most 12 words: answer the question,
-  return the greeting, or dodge in character), and the whole line, reply plus the original words, is
-  voiced anew. The reply is checked against echoing the line, repeating earlier lines, and meta talk.
+  return the greeting, or dodge in character). The reply is checked against echoing the line,
+  repeating anything said tonight, starting with the line's own first word ("Hey, ... Hey!"), and
+  meta talk. In testing these lines took 1.9-3.1 s from the push to the audio, against 2-4 s before.
+- Only the reply is generated speech (second play test: voicing the whole line took 2-4 s and lost
+  the actor's delivery). The actor's take(s) follow it in one audio file. The speech block puts the
+  reply's phonemes first, then each take's own phrases and cues moved, not stretched, to where the
+  take starts, so the drama manager's gestures still land on the actor's words. No acting call is
+  made for these lines: the drama manager performs them as usual. A line whose parts lack a
+  recording (the per-name fragments) is still voiced whole.
 - Fragments and bare reactions ("Uh...", "get divorced...") always play as written; the guest's
   words then wait for the next whole line.
 - The parser restatement no longer adds meaning ("umm what" stays "What?").
+- **The parser's trait words.** Façade's parser treats some words as the guest's verdict on a host,
+  and the drama manager answers "You think I'm... communicative..." (`general.rul` in the install,
+  zlib-compressed: rules `ipExplainAdviceParam_*`). "heard", "hear", "listen" and "talk" count as
+  *communicative*, "fight" and "argue" as *angry*, "scared" and "hide" as *afraid*, and so on. "I
+  heard all this arguing" drew exactly that in the second play test. The restatement now uses those
+  words only when the guest really tells a host what they are or should do; "I heard..." becomes "I
+  noticed..." either way.
+- **Repeats.** Generated lines are checked against everything generated tonight: much the same
+  words, the same first four words, any shared run of five words, or a whole sentence again ("Want
+  a drink?"). A rejected scene line starts the request over with the rejected text named, instead
+  of showing the model its own attempt (it rewrote the same line three times). llama.cpp's DRY
+  penalty was tried and dropped: it garbled words ("a lot_of", "butI"). In a scene, a host chimes in
+  at most once (it used to after every answer, which sounded like a rerun). Scene lines ask for at
+  most 16 words and are cut to the whole sentences that fit 18, for speed.
+- **Who answers in a scene.** A named host answers; a follow-up ("what do you mean") goes to whoever
+  just spoke; otherwise they take turns. The prompt says which host said the last line, after Trip
+  answered for Grace's joke.
+- **A cut-off line.** When the guest types, the drama manager often aborts the line being spoken
+  (`abortAnimationScripts`, layer 7), and no `ScriptFinished` follows. The bridge counted that host as
+  mid-line for 30 s, so the other one took every scene line. An abort now ends the line.
+
+## Subtitles (2026-10-29)
+
+The engine times subtitles by their text, not their audio (`animEngineDLL` v1.1, `0x1009DD90`). It
+types a line out word by word at 0.75 frames per character, holds it 60 frames, then clears it. That
+fits the actors' pacing; generated speech often runs longer, and its subtitle went before the words.
+The engine side of the bridge (`hold_subtitles` in `inject.cpp`) now notes how long each voice file
+lasts when the engine opens it, and while it plays keeps the subtitle's hold from running out. The
+character objects are at `0x1097947C` (Grace) and `0x10979480` (Trip); in each, the text is at
+`+0x13E1C`, the shown range at `+0x1411C`/`+0x14120`, and the frame the hold began at `+0x14124`. The
+frame counter is `0x1083F62C`, and the menu's Subtitles flag is the byte at `0x10979471` (the
+autopilot's `subtitles on`). Tested with frames every 0.25 s: a 6.8 s answer kept its subtitle to the
+end and cleared after.
+
+Fully generated lines (scenes) also get their phonemes split into phrases at punctuation, each
+starting at its share of the voiced audio, as in the actors' records, instead of one phrase for the
+whole line.
 
 ## Off-script scenes and following (built 2026-10-28)
 
@@ -146,7 +190,8 @@ out. Nobody ever follows the guest.
 
 - **Scenes** (`engine/service/improv.py`). A scene starts in three ways:
   - something the guest types takes the evening somewhere new (an LLM check, NEW or USUAL, with
-    examples and a USUAL default);
+    examples and a USUAL default; questions about the fighting, confusion and "that's not what I
+    said" are USUAL);
   - the drama manager picks one of its off-script reactions (`DEFLECT*`, `*UNCOOP`, `*LEAVEAPARTMENT`,
     `*LEAVEFORKITCHEN` beats);
   - the guest walks into the hallway after coming in.

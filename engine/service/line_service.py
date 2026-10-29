@@ -1,7 +1,7 @@
 """Line service: answers, voice and lip sync for the lines the original drama manager chooses.
 
 A story line plays as written (the actor's own take) unless the guest has said something it should
-answer: then the character says a few generated words first and the whole line is voiced anew.
+answer: then the character says a few generated words first, and the actor's take follows them.
 
 The bridge (in the game's Java process) calls this for every line before it plays:
 
@@ -58,6 +58,11 @@ OUT_SR = 22050
 NAME_BEATS = {"player", "MALE", "FEMALE"}
 DEADLINE_S = 5.5            # the bridge waits 6.5 s for a line; later than this we don't deliver
 UNANSWERED_S = 25           # the guest's words still want an answer for this long
+GAP_S = 0.12                # between a lead-in and the actor's take
+# Sampling for generated lines. (llama.cpp's DRY penalty against repeated runs of words garbled the
+# text in testing: "a lot_of good stories", "butI", a stray "</think>". Repeats are caught by
+# `repeats` instead.)
+SAMPLING = {"top_p": 0.9, "chat_template_kwargs": {"enable_thinking": False}}
 
 
 def log(*a):
@@ -72,7 +77,7 @@ class Lines:
         self.perf = {c: ff.read_sbinary(FACADE, c) for c in CHARS.values()}
         self.memory = []      # tonight: ("guest"|"grace"|"trip", text)
         self.unanswered = []  # (time, words) the guest said that no line has answered yet
-        self.leads = []       # tonight's lead-ins (lead_in), so none comes back
+        self.generated = []   # tonight's generated words (lead-ins, scene lines), so none comes back
         self.player_name = None
         self.scene = None     # an off-script scene in progress (improv.Scene): the story is paused
         self.ending = None    # the scene that just ended: the next story line bridges from it
@@ -93,6 +98,9 @@ class Lines:
         # the evening otherwise pays several seconds of setup mid-scene.
         warm = self.by_id[("trip", 1074)]
         self.lead_in("trip", warm, warm["text"], ["hi!"], None)
+        self.restate("hi!", "")   # (the first typed line of the evening timed out without this)
+        improv.takes_it_somewhere_new("hi!", "")
+        self.generated = []
         INJECT.mkdir(parents=True, exist_ok=True)
         for f in INJECT.iterdir():
             f.unlink(missing_ok=True)
@@ -176,10 +184,10 @@ class Lines:
             {"role": "user", "content":
                 (f"Tonight so far:\n{recent}\n\n" if recent else "") + (place + "\n" if place else "") + task},
         ]
+        earlier = self.generated[-30:] + [t for who, t in self.memory[-20:] if who == char]
         for _ in range(2):
             r = requests.post(LLM_URL, timeout=3, json={
-                "messages": prompt, "temperature": 0.4, "top_p": 0.9, "max_tokens": 40,
-                "chat_template_kwargs": {"enable_thinking": False},
+                "messages": prompt, "temperature": 0.5, "max_tokens": 40, **SAMPLING,
             })
             r.raise_for_status()
             text = r.json()["choices"][0]["message"]["content"].strip()
@@ -187,15 +195,20 @@ class Lines:
             text = plain_ascii(re.sub(r"\*[^*]*\*|\([^)]*\)", " ", text.splitlines()[0])) if text else ""
             if not text or re.fullmatch(r"\W*none\W*", text, re.I):
                 return ""
+            text = text[0].upper() + text[1:]
             meta = bool(re.search(r"\b(here's|here is) (\w+'s )?(line|response)|\b(scene|script|director)\b",
                                   text, re.I)) or text.lower().startswith(("sure,", "sure!", "certainly"))
             echo = same_words(text, original, threshold=0.6)
-            repeat = any(same_words(text, t, threshold=0.8) for t in self.leads[-8:] + [t for _, t in self.memory[-10:]])
-            if len(text.split()) <= 18 and not meta and not echo and not repeat:
+            repeat = repeats(text, earlier)
+            # "Hey, everything's fine. Hey! God it's been so long...": the same word twice in a row
+            same_start = first_word(text) == first_word(original)
+            if len(text.split()) <= 18 and not (meta or echo or repeat or same_start):
                 return text
             prompt += [{"role": "assistant", "content": text},
-                       {"role": "user", "content": "That repeats something already said; reply with something new." if repeat
-                        else "Only the short reply (at most 12 words), not the line itself."}]
+                       {"role": "user", "content":
+                           "That repeats something already said tonight; reply with something new." if repeat else
+                           f"The line starts with \"{first_word(original)}\" too; start the reply differently."
+                           if same_start else "Only the short reply (at most 12 words), not the line itself."}]
         return ""
 
     def improvise(self, char, scene, guest_words):
@@ -205,10 +218,15 @@ class Lines:
         recent = "\n".join(f"{who.upper()}: {t}" for who, t in self.memory[-14:])
         other = "trip" if char == "grace" else "grace"
         place = improv.describe(self.where, char)
+        last = next(((who, t) for who, t in reversed(self.memory) if who in ("grace", "trip")), None)
+        said_last = ""
+        if last and last[0] != char:   # "I didn't say anything about the ceiling" (Grace had)
+            said_last = (f" The last host line was {last[0].capitalize()}'s, not {char.capitalize()}'s: "
+                         f"\"{last[1]}\".")
         if guest_words:
-            task = (f"The guest just said or did: \"{' / '.join(guest_words[-3:])}\". {char.capitalize()} answers "
-                    f"that directly: if it's a question or a request to {char.capitalize()}, answer it or do it "
-                    f"(or refuse, in character).")
+            task = (f"The guest just said or did: \"{' / '.join(guest_words[-3:])}\".{said_last} {char.capitalize()} "
+                    f"answers the guest directly: if it's a question or a request to {char.capitalize()}, answer it "
+                    f"or do it (or refuse, in character).")
         else:
             task = (f"The guest has gone quiet. {char.capitalize()} keeps the moment going: a question to the "
                     f"guest, a reaction to what was just said, or a remark to {other.capitalize()}.")
@@ -228,41 +246,50 @@ class Lines:
                 f"{other.capitalize()} or the guest. Words in "
                 "*asterisks* or (parentheses) are things the guest physically does. Never mention a script, a "
                 "play or a director.",
-                "Natural spoken English; no stage directions, no quotation marks, no speaker name. At most "
-                "25 words. Output only the line.",
+                "Natural spoken English; no stage directions, no quotation marks, no speaker name. One or "
+                "two short sentences, at most 16 words. Never reuse a phrase or sentence pattern from earlier "
+                "lines (no \"You're not the first...\" twice), and don't tack an offer or question on the end out "
+                "of habit (\"Want a drink?\"). Output only the line.",
             ])},
             {"role": "user", "content":
                 (f"Tonight so far:\n{recent}\n\n" if recent else "") +
                 f"What's going on: {scene.what}.\n" + (f"{place}\n" if place else "") + task +
                 f"\nWrite {char.upper()}'s line."},
         ]
-        for _ in range(3):
+        earlier = self.generated[-30:] + [t for _, t in self.memory[-20:]]
+        for attempt in range(3):
             r = requests.post(LLM_URL, timeout=4, json={
-                "messages": prompt, "temperature": 0.8, "top_p": 0.9, "max_tokens": 70,
-                "chat_template_kwargs": {"enable_thinking": False},
+                "messages": prompt, "temperature": 0.75 + 0.1 * attempt, "max_tokens": 60, **SAMPLING,
             })
             r.raise_for_status()
             text = r.json()["choices"][0]["message"]["content"].strip()
             text = re.sub(r'^\s*(grace|trip)\s*[:|]\s*', "", text, flags=re.I).strip().strip('"').strip()
             text = plain_ascii(re.sub(r"\*[^*]*\*|\([^)]*\)", " ", text.splitlines()[0])) if text else ""
             text = re.sub(r"\s*-\s*([.,!?])", r"\1", re.sub(r"\s+([.,!?])", r"\1", text))  # left by a removed *action*
-            repeat = any(same_words(text, t, threshold=0.8) for _, t in self.memory[-10:]) if text else False
+            # too long: keep the whole sentences that fit (a long first sentence only if it's not very long)
+            text = first_sentences(text, 18) or (text if len(text.split()) <= 24 else "")
+            repeat = repeats(text, earlier) if text else False
             narration = bool(re.match(r"^(\w+ )?(clears|sighs|laughs|looks|nods|smiles|shrugs|pauses|turns)\b",
                                       text, re.I))
             # the model talking about the task ("Sure, here's Trip's line...") instead of doing it
             meta = bool(re.search(r"\b(here's|here is) (\w+'s )?(line|response)|\bin character\b|\b(scene|script)\b",
                                   text, re.I)) or text.lower().startswith(("sure,", "sure!", "certainly"))
-            if text and len(text.split()) <= 32 and not repeat and not narration and not meta:
+            if text and not repeat and not narration and not meta:
                 return text
-            if meta or not text:   # start over rather than argue with it (empty: it wrote only an *action*)
-                prompt = prompt[:2] + ([] if meta else [
+            log(f"    (scene line rejected: {'repeat' if repeat else 'meta' if meta else 'other'}: {text})")
+            if meta or repeat or not text:
+                # Start over rather than argue with it: shown its own attempt, it rewrote the same line
+                # ("I heard that. It sounded like a knock..." three times). Empty: it wrote only an *action*.
+                if repeat:
+                    prompt[1] = {"role": "user", "content": prompt[1]["content"] +
+                                 f"\n(Already said tonight, so not this: \"{text}\")"}
+                prompt = prompt[:2] + ([] if text else [
                     {"role": "assistant", "content": r.json()["choices"][0]["message"]["content"].strip()},
                     {"role": "user", "content": f"Only the words {char.capitalize()} says out loud; no actions. "
                                                 f"If {char.capitalize()} does something, say it in the words."}])
                 continue
             prompt += [{"role": "assistant", "content": text},
-                       {"role": "user", "content": "That repeats something already said; say something new." if repeat
-                        else "Shorter: at most 28 words. Only the line."}]
+                       {"role": "user", "content": "Only the words, nothing else."}]
         return ""
 
     def voice(self, char, line, text):
@@ -283,8 +310,10 @@ class Lines:
             audio = match_take(audio, FACADE / orig, offscreen)
         return audio, emotion
 
-    def record(self, char, script, text, audio_s):
-        """The original record with its speech block replaced: new phonemes, cues retimed, new text."""
+    def record(self, char, script, text, audio_s, audio=None):
+        """The original record with its speech block replaced: new phonemes, cues retimed, new text.
+        With `audio`, the phonemes go in one phrase per stretch of the text (split at punctuation),
+        each starting when it's spoken, as in the actor's records; otherwise all in one phrase."""
         order, rec = self.raw[char][script]
         perf = self.perf[char][script]
         b = rec.index(ff.OP_SPEECH)
@@ -293,11 +322,47 @@ class Lines:
         orig_wav = self.by_id[(char, script)].get("audio")
         orig_s = _wav_seconds(FACADE / orig_wav) if orig_wav else orig_end / 1000 + 0.45
         ratio = audio_s / max(orig_s, 0.2)
-        speech = [perf.base_frame, 0, 1, ff.PHONEME_START] + text_to_codes(text) + [0]
-        for t, cue in perf.cues[:-1]:
-            speech += [max(1, int(t * ratio)), cue]
+        phrases = phrase_times(text, audio) if audio is not None else [(0, text)]
+        events = [(t, 0, [ff.PHONEME_START] + text_to_codes(chunk) + [0]) for t, chunk in phrases[1:]]
+        events += [(max(1, int(t * ratio)), 1, [cue]) for t, cue in perf.cues[:-1]]
+        speech = [perf.base_frame, 0, 1, ff.PHONEME_START] + text_to_codes(phrases[0][1]) + [0]
+        for t, _, rest in sorted(events, key=lambda ev: (ev[0], ev[1])):
+            speech += [t] + rest
         # The script ends at its last cue time; end just after our audio so no words get clipped.
         speech += [int(audio_s * 1000) + 150, 0, -1, script]
+        speech += [ord(c) for c in text.encode("latin-1", "replace").decode("latin-1")] + [-1]
+        return rec[:b + 1] + speech + rec[e:]
+
+    def takes(self, char, scripts):
+        """The actor's recordings of a line, in order (name fragments included), as [(script, audio)];
+        None if one is missing (then the line can only be voiced whole)."""
+        out = []
+        for s in scripts:
+            if s <= 0:
+                continue
+            l, p = self.by_id.get((char, s)), self.perf[char].get(s)
+            if not (l and l.get("audio") and p and p.cues):
+                return None
+            out.append((s, _read_wav(FACADE / l["audio"])))
+        return out or None
+
+    def joined_record(self, char, script, lead, lead_s, takes, text, total_s):
+        """`script`'s record with a speech block for lead-in + takes: the lead-in's phonemes from 0,
+        then each take's own phrases and cues, moved to where that take starts in the joined audio
+        (not stretched: the drama manager's gestures stay on the actor's words)."""
+        order, rec = self.raw[char][script]
+        b = rec.index(ff.OP_SPEECH)
+        e = next(i for i in range(b + 1, len(rec)) if rec[i] >= ff.BODY_START)
+        speech = [self.perf[char][script].base_frame, 0, 1, ff.PHONEME_START] + text_to_codes(lead) + [0]
+        events, at = [], lead_s + GAP_S
+        for s, audio in takes:
+            p, off = self.perf[char][s], int(at * 1000)
+            events += [(t + off, 0, list(codes) + [0]) for t, codes in p.mouth]
+            events += [(t + off, 1, [cue]) for t, cue in p.cues[:-1]]
+            at += len(audio) / OUT_SR
+        for t, _, rest in sorted(events, key=lambda ev: (ev[0], ev[1])):
+            speech += [max(1, t)] + rest
+        speech += [int(total_s * 1000) + 150, 0, -1, script]
         speech += [ord(c) for c in text.encode("latin-1", "replace").decode("latin-1")] + [-1]
         return rec[:b + 1] + speech + rec[e:]
 
@@ -336,7 +401,7 @@ class Lines:
             self.lines_kind = "return" if bridge else "answer"
             text = f"{first} {written}" if first else ""
             if first:
-                self.leads.append(first)
+                self.generated.append(first)
             if not first or len(text) <= MAX_SUBTITLE:
                 self.unanswered = []   # answered now: by the lead-in, or by the line itself (NONE)
             if not text or len(text) > MAX_SUBTITLE:   # (too long: the next line answers instead)
@@ -344,42 +409,51 @@ class Lines:
                 log(f"{char} #{script} {line['beat']} as written ({'it answers' if not first else 'no room'}): {written}")
                 return {"replace": False, "why": "line answers it" if not first else "too long with a lead-in"}
             t1 = time.perf_counter()
-            # The acting (expression, gesture, gaze). Chosen before the voice renders, not alongside
-            # it: sharing the GPU slowed both more than doing them one after the other.
-            direction = " ".join(w.lower() for w in line["direction"]) or "natural"
-            recent = "\n".join(f"{who.upper()}: {t}" for who, t in self.memory[-4:])
-            pick = performance.choose(char, text, direction, recent, timeout=1.0)
-            t2 = time.perf_counter()
-            voiced = self.voice(char, line, text)
+            # Only the lead-in is generated speech; the actor's take(s) follow it, so the line keeps
+            # its performance, the drama manager's own gestures stay on its words, and the voice model
+            # renders a few words instead of the whole line (1-3 s less). No acting call either: the
+            # drama manager performs its line as usual.
+            takes = self.takes(char, scripts)
+            voiced = self.voice(char, line, first if takes else text)
             if voiced is None:
                 return {"replace": False, "why": "voice off for this character"}
             audio, emotion = voiced
+            rec = None
+            if takes:
+                lead_s = len(audio) / OUT_SR
+                audio = np.concatenate([audio, np.zeros(int(GAP_S * OUT_SR), audio.dtype)] +
+                                       [a.astype(audio.dtype) for _, a in takes])
+                rec = self.joined_record(char, script, first, lead_s, takes, text, len(audio) / OUT_SR)
         if time.perf_counter() - t0 > DEADLINE_S:
             # The bridge has (almost) stopped waiting and played the original; writing files now
             # would leave a stale line queued for the next time this script comes up.
             log(f"{char} #{script} too slow ({time.perf_counter() - t0:.1f}s): dropped")
             return {"replace": False, "why": "too slow"}
-        out = self.emit(char, script, text, audio, pick)
+        out = self.emit(char, script, text, audio, None, rec)
         log(f"{char} #{script} {line['beat']} {self.lines_kind.upper()} [{emotion}] "
             f"{time.perf_counter() - t0:.2f}s (words {t1 - t0:.2f}s, "
-            f"acting {t2 - t1:.2f}s)\n"
-            f"    answering: {' / '.join(since) or '-'}\n    now: {text}\n    acting: {pick or 'none chosen'}")
+            f"{'lead-in + actor' if takes else 'whole line voiced'})\n"
+            f"    answering: {' / '.join(since) or '-'}\n    now: {text}")
         return out
 
-    def emit(self, char, script, text, audio, pick):
-        """Queue a generated line for the engine (see the module docstring) and remember it."""
+    def emit(self, char, script, text, audio, pick, rec=None):
+        """Queue a generated line for the engine (see the module docstring) and remember it.
+        `pick`: the acting (performance.choose), or None to leave it to the drama manager.
+        `rec`: the record to play (default: `script`'s, retimed to the audio)."""
         file_no = self.perf[char][script].base_frame + 1
         wav_path = INJECT / f"{char}_{file_no}_{uuid.uuid4().hex[:8]}.wav"
         _write_wav(wav_path, audio)
-        rec = self.record(char, script, text, len(audio) / OUT_SR)
+        rec = rec or self.record(char, script, text, len(audio) / OUT_SR, audio)
         stem = INJECT / f"{char}_{script}"
         np.array(rec, "<i4").tofile(stem.with_suffix(".tok"))
         stem.with_suffix(".job.tmp").write_text(f"file={file_no}\nwav={wav_path}\n", encoding="utf-8")
         os.replace(stem.with_suffix(".job.tmp"), stem.with_suffix(".job"))  # the job file appears last
         self.memory.append((char, text))
-        perform = performance.spec(char, dict(pick), text, len(audio) / OUT_SR)
-        return {"replace": True, "script": script, "file": file_no, "text": text, "perform": perform,
-                "ms": int(len(audio) / OUT_SR * 1000)}
+        out = {"replace": True, "script": script, "file": file_no, "text": text,
+               "ms": int(len(audio) / OUT_SR * 1000)}
+        if pick is not None:
+            out["perform"] = performance.spec(char, dict(pick), text, len(audio) / OUT_SR)
+        return out
 
     # ---- scenes: the story paused while the guest takes the evening somewhere new ----
     def pause_story(self, char, line):
@@ -436,8 +510,14 @@ class Lines:
             return self.end_scene("time")
         words = list(s.inbox)
         if words:
+            # A named host answers; a follow-up ("what do you mean") goes to whoever just spoke;
+            # otherwise they take turns (Grace answered all four of the ghost scene's lines in
+            # testing while Trip stood by).
             last = s.speakers[-1] if s.speakers else None
-            char = improv.addressed(words[-1]) or last or self.nearer_host()
+            follow_up = last and re.match(r"\W*(what do you mean|what\?|huh|really|why|how so|wait|like what)\b",
+                                          words[-1], re.I)
+            char = (improv.addressed(words[-1]) or (last if follow_up else None) or
+                    {"grace": "trip", "trip": "grace"}.get(last) or self.nearer_host())
             if char not in free:
                 char = next(iter(free))
             s.inbox.clear()
@@ -462,6 +542,7 @@ class Lines:
                                       "\n".join(f"{w.upper()}: {t}" for w, t in self.memory[-4:]), timeout=1.0)
             audio, emotion = self.voice(char, template, text)
             out = self.emit(char, template["script_index"], text, audio, pick)
+            self.generated.append(text)
         s.spoke(char)
         out.update(say=True, char=next(k for k, v in CHARS.items() if v == char))
         log(f"{char} SCENE [{emotion}] {time.perf_counter() - t0:.2f}s\n    now: {text}\n    acting: {pick or 'none chosen'}")
@@ -514,7 +595,7 @@ class Lines:
         if self.scene:
             self.scene.guest_back = True   # the guest turned back to the evening: the story picks up
             log("    guest is back on the evening; the scene will close")
-        r = requests.post(LLM_URL, timeout=2.5, json={
+        r = requests.post(LLM_URL, timeout=1.3, json={   # (the bridge waits 1.5 s, then sends the raw words)
             "messages": [
                 {"role": "system", "content": UNDERSTAND_PROMPT},
                 {"role": "user", "content": (f"Just before:\n{recent}\n\n" if recent else "") +
@@ -527,6 +608,7 @@ class Lines:
         out = re.sub(r"^(the guest (typed|said|says)|guest|restated)\s*[:,]\s*", "", out, flags=re.I).strip().strip('"')
         if not out or len(out) > 160:
             return text, False
+        out = _HEARD.sub(lambda m: f"{m.group(1)}{m.group(2) or ''} notice{'d' if m.group(4).lower() == 'heard' else ''}", out)
         log(f"    parser hears: {out}")
         return out, False
 
@@ -546,7 +628,18 @@ sentence (or two) that keeps the same meaning and makes their intent obvious, us
 Fix spelling and slang ("hows it goin" -> "Hi! How are you?"). Keep names (Grace, Trip). If it's addressed to
 someone, keep who; never add a name the guest didn't use. Never add things the guest didn't mean: confusion
 stays confusion ("umm what" -> "What?"; "huh?" -> "What?"), and a question stays the same question
-("what happened" -> "What happened?"). Output only the restated sentence."""
+("what happened" -> "What happened?").
+The parser takes some words as the guest's verdict on Grace or Trip, and they answer "You think I'm...":
+hear, heard, listen, talk (as "you're communicative"), fight, argue (angry), scared, afraid, hide, embarrassed
+(afraid), lie, pretend, fake (lying), blame, fault, problem (to blame), control, force, stop (controlling),
+alone, lonely (unloved). Use those words only when the guest really tells Grace or Trip what they are or should
+do ("you two should talk more", "you're lying", "stop fighting"). Otherwise say it without them:
+"i heard you guys arguing" -> "Is everything okay with you two?"; "that sounded scary" -> "Are you two okay?";
+"thought i heard a commotion" -> "Is everything okay?"; "can we talk about the painting" -> "Tell me about the
+painting."; "did you hear that?" -> "Did you notice that?". Output only the restated sentence."""
+
+# Hearing words in a restatement that isn't advice: the parser would read "you're communicative".
+_HEARD = re.compile(r"\b(I|we|you)( just| thought I| thought we)? (over)?(heard|hear)\b", re.I)
 
 def fragment(line):
     """A piece of a sentence the drama manager plays across several lines ("You think we should....",
@@ -556,6 +649,43 @@ def fragment(line):
     if len(words) < 3 or text[:1].islower():
         return True
     return len(words) < 6 and bool(re.search(r"(\.\.\.|--|-)\s*$", text))
+
+
+def first_sentences(text, max_words):
+    """The whole sentences from the start that fit in max_words ("" if the first doesn't)."""
+    out = ""
+    for s in re.findall(r"[^.?!]+[.?!]*\s*", text):
+        if len((out + s).split()) > max_words:
+            break
+        out += s
+    return out.strip()
+
+
+def first_word(text):
+    m = re.search(r"[A-Za-z']+", text)
+    return m.group().lower() if m else ""
+
+
+def repeats(text, earlier):
+    """Says again what an earlier line said: much the same words, the same opening four words
+    ("You're not the first to think we're fighting" / "You're not the first to offer..."), or any
+    run of five words ("...we have very strong opinions about things" / "...about a lot of things"),
+    or a whole sentence again ("Want a drink?" at the end of three lines in a row)."""
+    def words(t):
+        return re.findall(r"[a-z']+", t.lower())
+
+    def runs(w):
+        return {tuple(w[i:i + 5]) for i in range(len(w) - 4)}
+
+    def sentences(t):
+        return {tuple(s) for s in map(words, re.split(r"[.?!]+", t)) if len(s) >= 2}
+    w = words(text)
+    o, r, s = (w[:4] if len(w) >= 5 else None), runs(w), sentences(text)
+    for t in earlier:
+        wt = words(t)
+        if same_words(text, t, threshold=0.6) or (o and wt[:4] == o) or r & runs(wt) or s & sentences(t):
+            return True
+    return False
 
 
 MAX_SUBTITLE = 140  # longer subtitles overran the engine's buffer (garbage after ~150 characters)
@@ -617,12 +747,40 @@ def match_take(audio, orig_path, offscreen):
     return out * (0.98 / peak) if peak > 0.98 else out
 
 
+def phrase_times(text, audio):
+    """[(start ms, words)]: the text split at punctuation, each stretch starting where it falls in
+    the voiced part of the audio (by its share of the letters). The first starts at 0."""
+    chunks = [c.strip() for c in re.findall(r"[^,.;:?!-]+[,.;:?!-]*", text) if re.search(r"[A-Za-z]", c)]
+    if len(chunks) < 2:
+        return [(0, text)]
+    hop = OUT_SR // 100   # 10 ms
+    rms = np.sqrt(np.convolve(audio.astype(np.float64) ** 2, np.ones(hop) / hop, "same")[::hop])
+    voiced = np.nonzero(rms > rms.max() * 0.1)[0]
+    on, off = (voiced[0], voiced[-1]) if len(voiced) else (0, len(rms))
+    sizes = [len(re.sub(r"[^A-Za-z]", "", c)) for c in chunks]
+    out, done = [], 0
+    for c, n in zip(chunks, sizes):
+        out.append((int((on + (off - on) * done / sum(sizes)) * 10), c))
+        done += n
+    out[0] = (0, out[0][1])
+    return out
+
+
 def _wav_seconds(path):
     try:
         with wave.open(str(path)) as w:
             return w.getnframes() / w.getframerate()
     except (OSError, wave.Error):
         return 1.0
+
+
+def _read_wav(path):
+    """An original take (22.05 kHz mono 16-bit) as float32."""
+    with wave.open(str(path)) as w:
+        pcm = np.frombuffer(w.readframes(w.getnframes()), "<i2")
+        sr = w.getframerate()
+    audio = pcm.astype(np.float32) / 32768
+    return audio if sr == OUT_SR else soxr.resample(audio, sr, OUT_SR)
 
 
 def _write_wav(path, audio):

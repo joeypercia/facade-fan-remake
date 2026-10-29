@@ -285,6 +285,50 @@ static const char *redirect_wav(const char *name, std::string &keep) {
     return keep.c_str();
 }
 
+// ---- subtitles last as long as the voice ----
+// The engine times a subtitle by its text, not its audio (animEngineDLL v1.1, 0x1009DD90): it types the
+// line out word by word at 0.75 frames per character, holds it 60 frames, then clears it. That fits
+// the actors' pacing; generated speech runs longer, and its subtitle went before the words did. So
+// while a character's voice file is still playing, the hold's start (the frame it began) is kept at
+// the current frame. The character objects are the engine's globals at 0x1097947C (Grace) and
+// 0x10979480 (Trip); in each, the subtitle text is at +0x13E1C, the shown range at +0x1411C/+0x14120,
+// and the frame the current step started at +0x14124. The frame counter is 0x1083F62C.
+static BYTE *g_eng_base;
+static volatile DWORD g_voice_until[2];
+static bool g_hold_logged[2];
+
+static void note_voice(const char *name, const char *opened) {
+    const char *p = name ? strstr(name, "sounds") : NULL;
+    if (!p || !opened) return;
+    int ch = strstr(p, "grace") == p + 7 ? 0 : strstr(p, "trip") == p + 7 ? 1 : -1;
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (ch < 0 || !GetFileAttributesExA(opened, GetFileExInfoStandard, &fa)) return;
+    DWORD ms = (DWORD)((fa.nFileSizeLow > 44 ? fa.nFileSizeLow - 44 : 0) / 44.1);  // 22.05 kHz 16-bit mono
+    g_voice_until[ch] = GetTickCount() + ms + 200;
+}
+
+static void hold_subtitles() {
+    if (!g_eng_base) return;
+    DWORD now = GetTickCount();
+    for (int ch = 0; ch < 2; ch++) {
+        if ((LONG)(now - g_voice_until[ch]) >= 0) continue;
+        __try {
+            BYTE *obj = *(BYTE **)(g_eng_base + 0x97947C + 4 * ch);
+            if (!obj) continue;
+            const char *text = (const char *)(obj + 0x13E1C);
+            int len = (int)strnlen(text, 512), a = *(int *)(obj + 0x1411C), b = *(int *)(obj + 0x14120);
+            if (len > 0 && b == len && a < len) {  // all of it shown, holding: start the hold over
+                *(int *)(obj + 0x14124) = *(int *)(g_eng_base + 0x83F62C);
+                if (!g_hold_logged[ch]) { g_hold_logged[ch] = true; logf("inject: holding %s's subtitle \"%.40s\"", kChar[ch], text); }
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            g_eng_base = NULL;   // the layout isn't what we expect: stop touching it
+            logf("inject: subtitle hold disabled (unexpected memory layout)");
+            return;
+        }
+    }
+}
+
 static void restore_lines(int ch) {
     if (ch < 0 || ch > 1) return;
     EnterCriticalSection(&g_inject_lock);
@@ -312,11 +356,16 @@ static DWORD WINAPI inject_thread(LPVOID) {
             while (FindNextFileA(h, &fd));
             FindClose(h);
         }
+        hold_subtitles();
         Sleep(5);
     }
 }
 
-static void inject_attach() {
+static void inject_attach(HMODULE eng) {
+    // hold_subtitles' globals must lie inside the engine's image (v1.1 has them; another build might not).
+    IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)((BYTE *)eng + ((IMAGE_DOS_HEADER *)eng)->e_lfanew);
+    if (nt->OptionalHeader.SizeOfImage > 0x9BE97C) g_eng_base = (BYTE *)eng;
+    logf("inject: subtitle hold %s", g_eng_base ? "on" : "off (unknown engine build)");
     InitializeCriticalSection(&g_inject_lock);
     CloseHandle(CreateThread(NULL, 0, inject_thread, NULL, 0, NULL));
 }
