@@ -101,6 +101,8 @@ class Lines:
             self.free_files[c] = [n for n in range(1, max(used)) if n not in used]
             self.next_file[c] = max(used) + 1
         self.lock = threading.Lock()
+        import nlu
+        self.nlu = nlu.Parser()   # Façade's own parser, for the act picker (pick_acts)
         from voice import Voices
         self.voices = Voices(self.catalog, mute=True)
         self.voices.load()
@@ -673,19 +675,29 @@ class Lines:
         return "", True
 
     def pick_acts(self, text, recent):
-        """(phrase for the parser, acts) for what the guest meant; ("", []) when nothing fits."""
+        """(phrase for the parser, acts) for what the guest meant; ("", []) when nothing fits.
+        Façade's own parser reads the guest's words first (it was written for this, and gets most plain
+        remarks right: "this furniture sucks", "trip you're an asshole"); the model keeps what's right in
+        that reading, drops what a word's other meaning set off ("now we're talking": you're
+        communicative) and fills in what it missed ("k", "grace does seem spoiled")."""
+        reading = self.nlu.read(text)
+        seen = acts.from_parser(reading) if reading else []
+        said = ", ".join(e + (f" @{who}" if who and acts.spoken_to(text, who) else "") for e, who in seen)
+        # Worked examples as earlier turns: with rules alone the model wrote names that aren't on the
+        # menu ("ugly:decorating", "hey") and lists of six drinks.
+        shots = []
+        for before, typed, parser_said, answer in ACTS_SHOTS:
+            shots += [{"role": "user", "content": acts_question(before, typed, parser_said)},
+                      {"role": "assistant", "content": answer}]
         r = requests.post(LLM_URL, timeout=1.0, json={   # (the bridge waits 1.5 s, then sends the raw words)
-            "messages": [
-                {"role": "system", "content": ACTS_PROMPT},
-                {"role": "user", "content": (f"Just before:\n{recent}\n\n" if recent else "") +
-                                            f"The guest typed: {text}"},
-            ],
+            "messages": [{"role": "system", "content": ACTS_PROMPT}] + shots + [
+                {"role": "user", "content": acts_question(recent, text, said if reading is not None else None)}],
             "temperature": 0.1, "max_tokens": 24, "chat_template_kwargs": {"enable_thinking": False},
         })
         r.raise_for_status()
         answer = r.json()["choices"][0]["message"]["content"].strip()
         out, picked = acts.render(answer.splitlines()[0] if answer else "", text)
-        log(f"    acts: {', '.join(picked) or 'none'} ({answer!r})")
+        log(f"    acts: {', '.join(picked) or 'none'} ({answer!r}; parser: {said or '-'})")
         return out, picked
 
 
@@ -693,26 +705,64 @@ ACTS_PROMPT = """You read what a guest typed in the interactive drama Façade (t
 a married couple, at their apartment) and say which of Façade's reactions it means. The menu:
 {menu}
 
+You're also shown how Façade's own 2005 parser read the words. It's keyword-based: usually right about plain
+remarks, often wrong when a word has another meaning ("now we're talking" -> you_are:communicative; "i heard
+you arguing" -> you_are:angry) and blind to anything it has no keyword for. Keep the entries of its reading
+that match what the guest meant, drop the rest, and add what it missed. (Its tone readings, agree, wow
+and the like, aren't shown: judge the guest's tone yourself.)
+
 Answer with acts from the menu, written exactly as listed, and nothing else: usually one; two (comma
-separated) only when the guest plainly does two things, like greeting and asking. Add @grace or @trip when the
-guest speaks to one of them by name. Answer none when nothing on the menu says what the guest means: small talk, a
-story, a joke, a question that isn't about one of the things on the menu. The hosts then answer the words
-themselves, so none is much better than a wrong act.
-- Read it in context: "yes" or "sure" answering "want a drink?" is agree; "hows it goin" is hello, how_are_you.
-- you_are, you_should and reveal only when the guest really tells them that. Hearing them argue is not
-  "you are angry": "i heard you guys arguing" -> are_you_okay. "you two should talk more" -> you_should:talk.
-- Confusion is confused: "what?", "huh?", "what do you mean", "umm what" -> confused. "that's not what i said"
-  -> disagree. "really? tell me more" -> tell_me_more.
-- Comments on a thing: the thing plus beautiful or ugly: "love your place" -> about:apartment, beautiful; "nice painting" ->
-  about:paintings, beautiful.
-  "can we talk about the painting" -> about:paintings. Praise, criticize and insult are about Grace or Trip.
+separated) only when the guest plainly does two things, like greeting and asking. Add @grace or @trip only when
+the guest speaks TO that host; words ABOUT a host said to the other use praise:grace, criticize:trip and so
+on. Answer none when nothing on the menu says what the guest means: small talk, a story, a joke, a question
+that isn't about one of the things on the menu. The hosts then answer the words themselves, so none is much
+better than a wrong act.
+- Read it in context: "yes", "sure", "k", "ok" answering a question are agree; "hows it goin" is hello,
+  how_are_you.
+- you_are, you_should and reveal only when the guest really tells them that. "i heard you guys arguing",
+  "what was all that commotion" -> are_you_okay. "you two should talk more" -> you_should:talk.
+- Confusion is confused: "what?", "huh?", "umm what" -> confused. Asking them to say more about what was just
+  said is tell_me_more: "what do you mean", "usual chaos?", "really? like how". "that's not what i said" ->
+  disagree.
+- Comments on a thing: the thing plus beautiful or ugly: "love your place" -> about:apartment, beautiful;
+  "these chairs are hideous" -> about:decorating, ugly; "nice painting" -> about:paintings, beautiful.
+  Praise, criticize and insult are about Grace or Trip themselves, never about things.
+- About one host to the other: "she's so uptight" -> criticize:grace; "trip is such a good host" ->
+  praise:trip.
 - Questions about a topic are that topic: "are you guys getting divorced?" -> about:divorce; "how long have
   you been married" -> about:marriage. "i'm with you, trip" -> ally @trip. "that's terrible" -> yuck.
-- Drinks: "i'd love a glass of wine" -> drink:red_wine; "just water" -> drink:water; "no thanks" -> disagree.
+- Drinks: drink: only when the guest names or accepts a drink ("i'd love a glass of wine" -> drink:red_wine;
+  "just water" -> drink:water). Asking what there is ("what do you have?") -> about:drinks. "no thanks" ->
+  disagree.
 - Words in *asterisks* are actions: "*hugs grace*" -> support @grace.
 - goodbye only when the guest is really leaving.
 - "anyway, how was your day" -> none. "let's talk about something else" -> none. "something knocked" -> none."""
 ACTS_PROMPT = ACTS_PROMPT.replace("{menu}", acts.menu())
+
+# (just before, the guest typed, what Façade's parser read, the answer): shown as earlier turns
+ACTS_SHOTS = [
+    ("TRIP: Can I get you something to drink?", "ya sure", "", "agree"),
+    ("", "were you guys fighting just now?", "you_are:angry", "are_you_okay"),
+    ("GRACE: I just redid the whole room.", "these lamps are so tacky", "about:decorating, about:apartment",
+     "about:decorating, ugly"),
+    ("TRIP: She always has to have the most expensive everything.", "yeah she's pretty high maintenance", "",
+     "criticize:grace"),
+    ("", "grace you're hilarious", "praise @grace", "praise @grace"),
+    ("TRIP: I just stocked the bar with the good stuff.", "ooh what kind of stuff do you have", "",
+     "about:drinks"),
+    ("TRIP: Here, try this.", "now that's what i'm talking about", "you_should:talk", "wow"),
+    ("", "did you guys watch the game last night", "", "none"),
+    ("", "heyyy", "", "hello"),
+    ("GRACE: Trip thinks he's a comedian.", "lmao", "", "laugh"),
+]
+
+
+def acts_question(before, typed, parser_said):
+    """The act picker's question; parser_said None: the parser isn't running."""
+    q = (f"Just before:\n{before}\n\n" if before else "") + f"The guest typed: {typed}"
+    if parser_said is not None:
+        q += f"\nFaçade's parser reads: {parser_said}" if parser_said else "\nFaçade's parser found nothing in it."
+    return q
 
 def fragment(line):
     """A piece of a sentence the drama manager plays across several lines ("You think we should....",

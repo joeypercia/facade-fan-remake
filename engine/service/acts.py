@@ -41,6 +41,9 @@ SIMPLE = {
     "ugly":         ("Ugly.", "NegativeExcl"),
 }
 
+# praise:grace etc.: about one host, said to the other ("grace does seem spoiled" -> "Grace is mean.")
+ABOUT_HOST = {"praise": "great", "criticize": "mean", "insult": "a jerk"}
+
 # Entries that say little about what the guest wants: picking only these doesn't keep the guest's words
 # from being something new of their own (line_service.read_acts).
 VAGUE = {"maybe", "confused", "tell_me_more", "wow", "yuck", "laugh", "happy", "sad"}
@@ -133,6 +136,8 @@ def phrase(act):
     kind, _, arg = act.partition(":")
     if not arg:
         return SIMPLE.get(kind)
+    if kind in ABOUT_HOST and arg in ("grace", "trip"):   # said about a host, to the other
+        return f"{arg.capitalize()} is {ABOUT_HOST[kind]}.", f"{SIMPLE[kind][1]} {arg}"
     if kind == "about" and arg in ABOUT:
         return ABOUT[arg]
     if kind in ("you_are", "you_are_not") and arg in YOU_ARE and (kind, arg) != ("you_are_not", "unloved"):
@@ -154,8 +159,46 @@ def phrase(act):
     return None
 
 
+def from_parser(reading):
+    """Façade's own reading of the guest's words (nlu.Parser.read: [(type, params)]) as menu entries,
+    most specific first, each with the host it was aimed at if the parser named one: [(entry, who)].
+    Readings the menu doesn't carry (the story-topic ReferTos, SystemDoesntUnderstand) are left out."""
+    out = []
+    refers = {p[0] for t, p in reading if t == "ReferTo" and p}
+    for typ, params in reading:
+        who = next((p for p in params if p in ("grace", "trip")), None)
+        best = None
+        for e in every_act():
+            if e.partition(":")[0] in ABOUT_HOST and ":" in e:
+                continue   # the parser can't tell "about" from "to"; who it named says that
+            exp_typ, _, exp_param = phrase(e)[1].partition(" ")
+            if exp_typ != typ:
+                continue
+            if typ == "ReferTo":   # "ReferTo paintings why": the thing first, then the question word
+                if not params or exp_param != params[0]:
+                    continue
+            elif exp_param and exp_param not in params:
+                continue
+            if best is None or (exp_param and not phrase(best)[1].partition(" ")[2]):
+                best = e
+        if typ == "ReferTo" and best == "about:art" and len(refers) > 1:
+            best = None   # "artistAdv" rides along with every piece of furniture
+        if typ == "ReferTo" and not best and params and params[0] in ("why", "what", "how"):
+            best = "tell_me_more"   # "what do you mean": ReferTo what
+        if best and best not in [b for b, _ in out] and best not in NOISE:
+            out.append((best, None if typ in ("ReferTo", "ExplBig", "ExplBigNot") else who))
+    return out
+
+
+# The parser's tone readings: it tags most lines with a reflexive Agree, Disagree, PositiveExcl... ("what
+# was all that commotion": Agree), and the model trusted them. It judges tone on its own instead.
+NOISE = {"agree", "disagree", "wow", "yuck", "laugh", "happy", "sad", "maybe", "praise", "criticize",
+         "beautiful", "ugly"}
+
+
 def every_act():
     yield from SIMPLE
+    yield from (f"{k}:{h}" for k in ABOUT_HOST for h in ("grace", "trip"))
     yield from (f"about:{a}" for a in ABOUT)
     for a in YOU_ARE:
         yield f"you_are:{a}"
@@ -168,13 +211,37 @@ def every_act():
     yield from (f"drink:{a}" for a in DRINK)
 
 
+# What the model writes instead of an entry's name
+ALIASES = {"hey": "hello", "hi": "hello", "greet": "hello", "haha": "laugh", "lol": "laugh", "ok": "agree",
+           "yes": "agree", "no": "disagree", "thank_you": "thanks", "apologize": "sorry", "bye": "goodbye",
+           "drink:cabernet": "drink:red_wine", "drink:wine": "drink:red_wine", "drink:chardonnay": "drink:white_wine"}
+
+
 def known(part):
     """A menu entry for what the model wrote: itself, or the entry it nearly spelled
     ("reveal:trip_cheating" -> "reveal:trip_cheated"); None if nothing is close."""
+    part = ALIASES.get(part, part)
     if phrase(part):
         return part
     near = difflib.get_close_matches(part, list(every_act()), n=1, cutoff=0.8)
     return near[0] if near else None
+
+
+_THIRD = {"is", "was", "isnt", "isn", "wasnt", "does", "doesnt", "did", "didnt", "has", "hasnt", "had", "seems",
+          "always", "never", "really", "just", "and", "or", "loves", "hates", "likes", "said", "says", "thinks",
+          "looks", "acts", "sounds", "wants", "needs", "should"}
+
+
+def spoken_to(typed, name):
+    """Does the guest speak TO this host ("grace, ...", "grace you look...", "...right, trip?"), not just
+    about them ("grace does seem spoiled", said to Trip)?"""
+    n = re.escape(name.lower())
+    t = typed.lower()
+    m = re.search(rf"^\W*((hey|hi|hello|yo|oh|thanks|thank you|sorry|ok|okay|well|so|and|yeah|yes|no|nah|um|"
+                  rf"look|listen)\W+)*{n}\b('s\b)?\W*(\w+)?", t)
+    if m:   # the name opens the sentence: addressed, unless a third-person verb follows it
+        return not (m.group(3) or m.group(4) in _THIRD)
+    return bool(re.search(rf"[,\s]{n}\W*$", t))
 
 
 def render(answer, typed=None):
@@ -187,19 +254,33 @@ def render(answer, typed=None):
     if m:
         to = m.group(1).capitalize()
         answer = answer[:m.start()] + answer[m.end():]
-        if typed is not None and not re.search(rf"\b{to}\b", typed, re.I):
+        if typed is not None and not spoken_to(typed, to):
             to = None
-    acts = []
+    answer = re.sub(r"@\s*(\w+)", lambda m: f"about:{m.group(1)}" if m.group(1) in ABOUT else m.group(0), answer)
+    parts = []
     for part in re.split(r"[,;\s]+", answer):
         part = part.strip().replace("-", "_")
+        kind, _, arg = part.partition(":")
+        if kind in ("beautiful", "ugly", "yuck", "wow") and arg in ABOUT:   # "ugly:decorating"
+            parts += [f"about:{arg}", kind]
+        else:
+            parts.append(part)
+    acts = []
+    for part in parts:
         part = known(part) if part and part != "none" else None
+        if part and part.startswith("drink:") and any(a.startswith("drink:") for a in acts):
+            continue   # one drink ("drink:white_wine, drink:beer, drink:scotch...")
+        kind, _, host = (part or "").partition(":")
+        if kind in ABOUT_HOST and host and typed is not None and spoken_to(typed, host):
+            part, to = kind, host.capitalize()   # "grace you look beautiful": to her, not about her
         if part and part not in acts:
             acts.append(part)
     acts = acts[:2]
     if not acts:
         return "", []
     text = " ".join(phrase(a)[0] for a in acts)
-    if to:
+    if to and not any(a.partition(":")[0] in ABOUT_HOST and ":" in a for a in acts):
+        # ("Trip, Grace is mean." reads as criticizing both of them)
         text = f"{to}, {text[0].lower()}{text[1:]}" if not text.startswith(("I ", "I'", "Grace", "Trip")) \
             else f"{to}, {text}"
     return text, acts
@@ -220,6 +301,10 @@ GLOSS = {
     "you_are:to_blame": "it's their fault", "you_are:controlling": "bossy",
     "you_are:controlled": "pushed around", "you_are:unloved": "lonely",
     "you_should:talk": "communicate", "you_should:separate": "split up",
+    "drink:red_wine": "red wine, cabernet", "drink:white_wine": "white wine, chardonnay",
+    "praise:grace": "compliments only", "praise:trip": "compliments only",
+    "criticize:grace": "complaints: spoiled, uptight, snobby, mean",
+    "criticize:trip": "complaints: show-off, pushy, fake, mean",
 }
 
 
@@ -230,6 +315,8 @@ def menu():
     every = list(every_act())
     return "\n".join([
         "Plain acts: " + line(SIMPLE),
+        "Said about one host to the other (\"grace is so spoiled\" is criticize:grace): "
+        + line(f"{k}:{h}" for k in ABOUT_HOST for h in ("grace", "trip")),
         "The guest brings up, asks about or comments on: " + line(e for e in every if e.startswith("about:")),
         "The guest tells Grace or Trip what they are (or aren't): "
         + line(e for e in every if e.startswith("you_are")),

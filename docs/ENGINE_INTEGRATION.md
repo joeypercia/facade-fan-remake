@@ -204,6 +204,32 @@ phrases that are known to read that way (`engine/service/acts.py`).
 - **Speed and accuracy:** picking takes 0.09 s (median) against 0.3-1 s for the rewording. On 40
   typical guest lines (greetings, the argument, confusion, comments, drinks, advice, small talk) 39
   matched what the guest meant.
+
+### Façade's parser reads first (2026-10-31)
+
+The fourth play test showed the model alone misreading ordinary lines: "this furniture sucks" became
+"You're mean." (aimed at Grace), "grace does seem spoiled" became "Grace, you're great.", "whats on the
+menu" an order for white wine, "k" a greeting. Run on the same raw words, Façade's own parser got most
+plain remarks right (the furniture, the cabernet, "trip you're an asshole") and failed where a word
+has another meaning or it has no rule ("now we're talking": communicative; "grace does seem
+spoiled": nothing). Neither is good enough alone, so both are used:
+
+- `engine/service/nlu.py` keeps the parser running beside the service (`NluProbe` serving stdin; it
+  starts in ~6 s and reads a line in 10-70 ms).
+- Its reading becomes menu entries (`acts.from_parser`) and is shown to the model, which keeps what's
+  right, drops what a word's other meaning set off and adds what it missed. The parser's tone
+  readings (a reflexive Agree, PositiveExcl...) aren't shown: the model trusted them ("what was all
+  that commotion": agree).
+- Ten worked examples go in as earlier turns of the conversation; with rules alone the model wrote names
+  that aren't on the menu ("ugly:decorating", "hey") and listed six drinks. Near misses are mended in
+  `acts.render` (aliases, "@apartment", one drink).
+- Remarks about a host to the other get their own entries (criticize:grace → "Grace is mean."), and a
+  name counts as addressing that host only when it opens or closes the sentence without a
+  third-person verb after it (`acts.spoken_to`: "grace you look great" yes, "grace does seem
+  spoiled" no).
+- On 44 lines (the play test's own and the earlier set): 32 with the parser's full reading shown,
+  42 after the changes above, every play-test line among them. 277/277 menu phrases verified. If no JDK is found, the picker works
+  as before, without the parser's reading.
 - **Repeats.** Generated lines are checked against everything generated tonight: much the same
   words, the same first four words, any shared run of five words, or a whole sentence again ("Want
   a drink?"). A rejected scene line starts the request over with the rejected text named, instead

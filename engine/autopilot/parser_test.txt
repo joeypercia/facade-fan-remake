@@ -1,0 +1,20 @@
+# Parser-first act picking (10-31 play test): Façade's own parser reads the guest's words and the model
+# corrects that reading. The play test's misreads: "k" (was hello), "what was all that commotion" (was
+# confused), "this furniture sucks" (was "You're mean"), "grace does seem spoiled" (was "Grace, you're
+# great"), "whats on the menu" (was an invented drink order).
+0 shots 10
+@tr_intro_end+26 subtitles on
+@tr_intro_end+32 key J 0.2
+@tr_intro_end+36 key RETURN 0.2
+@tr_intro_end+50 key UP 1.5
+@tr_intro_end+62 say hey hey hey
+@tr_intro_end+80 say k
+@tr_intro_end+100 key UP 2.5
+@tr_intro_end+112 say what was all that commotion
+@tr_intro_end+135 say usual chaos?
+@tr_intro_end+160 say awesome! whats on the menu
+@tr_intro_end+185 say sweet cabernet sounds good
+@tr_intro_end+215 say this furniture sucks
+@tr_intro_end+240 say grace does seem spoiled
+@tr_intro_end+265 say trip you're such a show off
+@tr_intro_end+290 say grace you look great tonight

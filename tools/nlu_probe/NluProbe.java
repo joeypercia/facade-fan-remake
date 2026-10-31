@@ -5,7 +5,8 @@
 //   javac -cp <Facade>/util/classes -d out NluProbe.java
 //   java -cp out;<Facade>/util/classes NluProbe <Facade>/util/sources/facade lines.txt [beat]
 //
-// Output: one line per input, "text\tDA1 param; DA2 param; ...".
+// Output: one line per input, "text\tDA1 param; DA2 param; ..." ("-" when it reads nothing).
+// With "-" for the file it serves stdin instead: "READY", then one reply per line it's sent.
 
 import java.io.*;
 import java.util.*;
@@ -58,10 +59,17 @@ public class NluProbe {
         rete.store("__wmeKey", mix);
         rete.executeCommand("(shadowWME __factKey __wmeKey)");
 
-        BufferedReader in = new BufferedReader(new InputStreamReader(new FileInputStream(args[1]), "UTF-8"));
-        for (String line; (line = in.readLine()) != null; ) {
+        // "-": serve lines from stdin (the line service keeps one running), one reply per line
+        boolean serve = args[1].equals("-");
+        BufferedReader in = new BufferedReader(new InputStreamReader(
+                serve ? System.in : new FileInputStream(args[1]), "UTF-8"));
+        if (serve) {
+            out.println("READY");
+            out.flush();
+        }
+        for (String line; (line = in.readLine()) != null; out.flush()) {
             line = line.trim();
-            if (line.length() == 0 || line.startsWith("#")) continue;
+            if (!serve && (line.length() == 0 || line.startsWith("#"))) continue;
             buf.reset();
             try {
                 TemplateCompiler.Preprocessor.Process(line.toLowerCase(), rete);
